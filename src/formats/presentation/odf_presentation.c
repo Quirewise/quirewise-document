@@ -418,7 +418,7 @@ static int odp_open_layout(const void *data, size_t size,
     else return QW_STATUS_ERR_INVALID_ARGUMENT;
     rc = odp_build_html(data, size, format,
         format == QW_ODP_FORMAT_FODP ? NULL :
-            qw_format_resource_profile_get(input_format),
+            QW_FORMAT_INPUT_RESOURCE_PROFILE_DOCUMENT_ARCHIVE,
         &reader, error, sizeof(error));
     if (rc != QW_ODP_OK) {
         free(reader.html.data);

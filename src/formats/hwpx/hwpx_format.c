@@ -585,17 +585,14 @@ static int hwpx_native_open_layout(const void *input, size_t size,
 {
     QwHwpxDocument *document = NULL;
     QwHwpxStatus status;
-    QwInputFormat detected_format;
     char error[160] = {0};
     (void)options;
     if (!out_document) return QW_STATUS_ERR_INVALID_ARGUMENT;
     memset(out_document, 0, sizeof(*out_document));
     if (input_format != QW_FORMAT_HWPX || !input || !size)
         return QW_STATUS_ERR_INVALID_ARGUMENT;
-    detected_format = qw_archive_detect_format(input, size);
-    if (detected_format != QW_FORMAT_HWPX) return QW_STATUS_ERR_FORMAT;
     status = hwpx_parse_archive(input, size,
-        qw_format_resource_profile_get(QW_FORMAT_HWPX), &document,
+        QW_FORMAT_INPUT_RESOURCE_PROFILE_DOCUMENT_ARCHIVE, &document,
         error, sizeof(error));
     if (status != QW_HWPX_OK) {
         if (report) (void)snprintf(report->note, sizeof(report->note),

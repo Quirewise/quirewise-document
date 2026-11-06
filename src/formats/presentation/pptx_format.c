@@ -482,15 +482,9 @@ static int pptx_build_layout_html(const void *data, size_t size,
     if (!reader || !data || !size) return QW_STATUS_ERR_INVALID_ARGUMENT;
     memset(reader, 0, sizeof(*reader));
     memset(&zip, 0, sizeof(zip));
-#ifdef QUIREWISE_STANDALONE_PPTX
     if (!qw_zip_reader_init_mem_with_profile(
             &zip, data, size, 0u,
             QW_FORMAT_INPUT_RESOURCE_PROFILE_DOCUMENT_ARCHIVE)) {
-#else
-    if (!qw_zip_reader_init_mem_with_profile(
-            &zip, data, size, 0u,
-            qw_format_resource_profile_get(QW_FORMAT_PPTX))) {
-#endif
         if (report) (void)snprintf(report->note, sizeof(report->note),
             "PowerPoint Open XML package could not be opened as ZIP");
         return QW_STATUS_ERR_FORMAT;
