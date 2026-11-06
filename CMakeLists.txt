@@ -23,6 +23,9 @@ endif()
 if(NOT TARGET Quirewise::Image)
     find_package(QuirewiseImage CONFIG REQUIRED)
 endif()
+if(NOT TARGET Quirewise::Crypto)
+    find_package(QuirewiseCrypto CONFIG REQUIRED)
+endif()
 file(GLOB_RECURSE QW_SOURCES CONFIGURE_DEPENDS src/*.c src/*.cpp)
 add_library(quirewise_document ${QW_LIBRARY_TYPE} ${QW_SOURCES})
 add_library(Quirewise::Document ALIAS quirewise_document)
@@ -34,7 +37,7 @@ target_include_directories(quirewise_document PUBLIC
     "$<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>"
     "$<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>"
     PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src ${CMAKE_CURRENT_SOURCE_DIR}/src/core ${CMAKE_CURRENT_SOURCE_DIR}/src/formats ${CMAKE_CURRENT_SOURCE_DIR}/src/backends)
-target_link_libraries(quirewise_document PRIVATE Quirewise::Archive Quirewise::Data Quirewise::Compression Quirewise::Ebook Quirewise::Image)
+target_link_libraries(quirewise_document PRIVATE Quirewise::Archive Quirewise::Data Quirewise::Compression Quirewise::Ebook Quirewise::Image Quirewise::Crypto)
 install(TARGETS quirewise_document EXPORT QuirewiseDocumentTargets
     ARCHIVE DESTINATION "${CMAKE_INSTALL_LIBDIR}"
     LIBRARY DESTINATION "${CMAKE_INSTALL_LIBDIR}"
@@ -103,6 +106,17 @@ if(BUILD_TESTING)
     target_include_directories(quirewise_document_raster_path_test PRIVATE
         "${CMAKE_CURRENT_SOURCE_DIR}/src/backends")
     target_link_libraries(quirewise_document_raster_path_test PRIVATE quirewise_document)
+    add_executable(quirewise_document_encrypted_pdf_test
+        tests/encrypted_pdf_test.c)
+    target_compile_features(quirewise_document_encrypted_pdf_test PRIVATE c_std_11)
+    target_include_directories(quirewise_document_encrypted_pdf_test PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}/src/backends")
+    target_compile_definitions(quirewise_document_encrypted_pdf_test PRIVATE
+        QUIREWISE_ENCRYPTED_PDF="${CMAKE_CURRENT_SOURCE_DIR}/tests/data/encrypted-rc4.pdf")
+    target_link_libraries(quirewise_document_encrypted_pdf_test PRIVATE quirewise_document)
+    add_test(NAME quirewise_document_encrypted_pdf
+        COMMAND quirewise_document_encrypted_pdf_test)
+
     add_test(NAME quirewise_document_raster_path
         COMMAND quirewise_document_raster_path_test)
 

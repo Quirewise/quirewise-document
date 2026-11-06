@@ -17,6 +17,7 @@
 
 #include <quirewise/compression.h>
 #include <quirewise/image.h>
+#include <quirewise/crypto.h>
 
 #include <ctype.h>
 #include <stdarg.h>
@@ -43,6 +44,9 @@ typedef struct QwPdfObjectSlice {
 struct QwMuPdfReader {
     const uint8_t *data;
     size_t size;
+    int encrypted;
+    uint8_t encryption_key[16];
+    size_t encryption_key_size;
     size_t *page_objects;
     size_t page_count;
     QwPdfObjectSlice *slices;
@@ -396,6 +400,205 @@ static int pdf_register_object_stream(QwMuPdfReader *reader, size_t owner)
 }
 
 /* Return the raw stream bytes for an object, decompressed when FlateDecode. */
+
+static const uint8_t pdf_password_padding[32] = {
+    0x28, 0xbf, 0x4e, 0x5e, 0x4e, 0x75, 0x8a, 0x41, 0x64, 0x00, 0x4e, 0x56,
+    0xff, 0xfa, 0x01, 0x08, 0x2e, 0x2e, 0x00, 0xb6, 0xd0, 0x68, 0x3e, 0x80,
+    0x2f, 0x0c, 0xa9, 0xfe, 0x64, 0x53, 0x69, 0x7a
+};
+
+static void pdf_rc4(const uint8_t *key, size_t key_size, uint8_t *data,
+                    size_t size)
+{
+    uint8_t state[256];
+    size_t i, j = 0u;
+    for (i = 0u; i < 256u; ++i) state[i] = (uint8_t)i;
+    for (i = 0u; i < 256u; ++i) {
+        uint8_t swap;
+        j = (j + state[i] + key[i % key_size]) & 0xffu;
+        swap = state[i];
+        state[i] = state[j];
+        state[j] = swap;
+    }
+    i = 0u;
+    j = 0u;
+    {
+        size_t index;
+        for (index = 0u; index < size; ++index) {
+            uint8_t swap;
+            i = (i + 1u) & 0xffu;
+            j = (j + state[i]) & 0xffu;
+            swap = state[i];
+            state[i] = state[j];
+            state[j] = swap;
+            data[index] ^= state[(state[i] + state[j]) & 0xffu];
+        }
+    }
+}
+
+static int pdf_parse_hex_field(const char *dict, size_t size, const char *tag,
+                               uint8_t *out, size_t capacity, size_t *out_size)
+{
+    const char *found = pdf_memmem(dict, size, tag, strlen(tag));
+    const char *cursor;
+    size_t count = 0u;
+    if (!found) return 0;
+    cursor = strchr(found, '<');
+    if (!cursor) return 0;
+    ++cursor;
+    while (*cursor && *cursor != '>' && count < capacity) {
+        int hi, lo;
+        if (*cursor == ' ' || *cursor == '\n' || *cursor == '\r' ||
+            *cursor == '\t') {
+            ++cursor;
+            continue;
+        }
+        hi = isdigit((unsigned char)cursor[0])
+                 ? cursor[0] - '0'
+                 : (tolower((unsigned char)cursor[0]) >= 'a'
+                        ? tolower((unsigned char)cursor[0]) - 'a' + 10
+                        : -1);
+        lo = isdigit((unsigned char)cursor[1])
+                 ? cursor[1] - '0'
+                 : (tolower((unsigned char)cursor[1]) >= 'a'
+                        ? tolower((unsigned char)cursor[1]) - 'a' + 10
+                        : -1);
+        if (hi < 0 || lo < 0) return 0;
+        out[count++] = (uint8_t)((hi << 4) | lo);
+        cursor += 2;
+    }
+    *out_size = count;
+    return count > 0u;
+}
+
+static long pdf_parse_int_field(const char *dict, size_t size, const char *tag,
+                                long fallback)
+{
+    const char *found = pdf_memmem(dict, size, tag, strlen(tag));
+    char *end = NULL;
+    long value;
+    if (!found) return fallback;
+    value = strtol(found + strlen(tag), &end, 10);
+    if (end == found + strlen(tag)) return fallback;
+    return value;
+}
+
+static int pdf_setup_encryption(QwMuPdfReader *reader)
+{
+    const char *found;
+    size_t encrypt_object = 0u;
+    const char *dict = NULL;
+    size_t dict_size = 0u;
+    char *copy;
+    uint8_t o_value[48], u_value[48], id_value[64];
+    size_t o_size = 0u, u_size = 0u, id_size = 0u;
+    long revision, version, length_bits, permissions;
+    size_t key_size;
+    uint8_t md5_input[128];
+    uint8_t digest[16];
+    size_t md5_size;
+    size_t i;
+    found = pdf_memmem((const char *)reader->data, reader->size, "/Encrypt",
+                       8u);
+    if (!found) return 1;
+    {
+        char *end = NULL;
+        encrypt_object = (size_t)strtoul(found + 8, &end, 10);
+        if (!encrypt_object) return -1;
+    }
+    if (!pdf_object_body(reader, encrypt_object, &dict, &dict_size)) return -1;
+    copy = (char *)malloc(dict_size + 1u);
+    if (!copy) return -1;
+    memcpy(copy, dict, dict_size);
+    copy[dict_size] = '\0';
+    version = pdf_parse_int_field(copy, dict_size, "/V", -1);
+    revision = pdf_parse_int_field(copy, dict_size, "/R", -1);
+    length_bits = pdf_parse_int_field(copy, dict_size, "/Length", 40);
+    permissions = pdf_parse_int_field(copy, dict_size, "/P", 0);
+    if (!pdf_parse_hex_field(copy, dict_size, "/O", o_value, sizeof(o_value),
+                             &o_size) ||
+        !pdf_parse_hex_field(copy, dict_size, "/U", u_value, sizeof(u_value),
+                             &u_size) ||
+        (version != 1 && version != 2) || (revision != 2 && revision != 3) ||
+        o_size < 32u || u_size < 32u) {
+        free(copy);
+        return -1;
+    }
+    free(copy);
+    if (length_bits < 40 || length_bits > 128 || (length_bits % 8) != 0)
+        return -1;
+    key_size = (size_t)length_bits / 8u;
+    if (key_size > sizeof(reader->encryption_key)) return -1;
+    found = pdf_memmem((const char *)reader->data, reader->size, "/ID", 3u);
+    if (!found ||
+        !pdf_parse_hex_field(found, reader->size - (size_t)(found - (const char *)reader->data),
+                             "<", id_value, sizeof(id_value), &id_size) ||
+        id_size < 16u)
+        return -1;
+    memcpy(md5_input, pdf_password_padding, 32u);
+    memcpy(md5_input + 32u, o_value, 32u);
+    md5_input[64] = (uint8_t)(permissions & 0xff);
+    md5_input[65] = (uint8_t)((permissions >> 8) & 0xff);
+    md5_input[66] = (uint8_t)((permissions >> 16) & 0xff);
+    md5_input[67] = (uint8_t)((permissions >> 24) & 0xff);
+    memcpy(md5_input + 68u, id_value, 16u);
+    md5_size = 84u;
+    if (qw_crypto_md5_digest(md5_input, md5_size, digest) != 0) return -1;
+    if (revision >= 3) {
+        for (i = 0u; i < 50u; ++i) {
+            if (qw_crypto_md5_digest(digest, key_size, digest) != 0) return -1;
+        }
+    }
+    memcpy(reader->encryption_key, digest, key_size);
+    reader->encryption_key_size = key_size;
+    {
+        uint8_t check[32];
+        memcpy(check, pdf_password_padding, 32u);
+        if (revision == 2) {
+            pdf_rc4(reader->encryption_key, key_size, check, 32u);
+            if (memcmp(check, u_value, 32u) != 0) return -1;
+        } else {
+            uint8_t x[16];
+            memcpy(md5_input, pdf_password_padding, 32u);
+            memcpy(md5_input + 32u, id_value, 16u);
+            if (qw_crypto_md5_digest(md5_input, 48u, x) != 0) return -1;
+            pdf_rc4(reader->encryption_key, key_size, x, 16u);
+            for (i = 1u; i < 20u; ++i) {
+                pdf_rc4(reader->encryption_key, key_size, x, 16u);
+            }
+            if (memcmp(x, u_value, 16u) != 0) return -1;
+        }
+    }
+    reader->encrypted = 1;
+    return 0;
+}
+
+static void pdf_decrypt_object_data(const QwMuPdfReader *reader, size_t object,
+                                    uint8_t *data, size_t size)
+{
+    uint8_t extra[5];
+    uint8_t digest[16];
+    size_t digest_size;
+    if (!reader->encrypted || !size) return;
+    extra[0] = (uint8_t)(object & 0xffu);
+    extra[1] = (uint8_t)((object >> 8) & 0xffu);
+    extra[2] = (uint8_t)((object >> 16) & 0xffu);
+    extra[3] = 0u;
+    extra[4] = 0u;
+    digest_size = reader->encryption_key_size + 5u;
+    if (digest_size > sizeof(digest)) digest_size = sizeof(digest);
+    memcpy(digest, reader->encryption_key, reader->encryption_key_size);
+    memcpy(digest + reader->encryption_key_size, extra, 5u);
+    {
+        uint8_t final_digest[16];
+        if (qw_crypto_md5_digest(digest, reader->encryption_key_size + 5u,
+                                 final_digest) != 0)
+            return;
+        memcpy(digest, final_digest, sizeof(digest));
+    }
+    pdf_rc4(digest, digest_size, data, size);
+}
+
 static uint8_t *pdf_object_stream(const QwMuPdfReader *reader, size_t object,
                                   size_t *out_size)
 {
@@ -429,6 +632,46 @@ static uint8_t *pdf_object_stream(const QwMuPdfReader *reader, size_t object,
         --payload_size;
     }
     if (!payload_size || payload_size > QW_PDF_READER_MAX_STREAM) return NULL;
+    if (reader->encrypted) {
+        uint8_t *decrypted = (uint8_t *)malloc(payload_size);
+        if (!decrypted) return NULL;
+        memcpy(decrypted, reader->data + stream_offset, payload_size);
+        pdf_decrypt_object_data(reader, object, decrypted, payload_size);
+        if (!flate) {
+            *out_size = payload_size;
+            return decrypted;
+        }
+        {
+            size_t capacity = payload_size * 4u + 1024u;
+            size_t attempt;
+            for (attempt = 0u; attempt < 4u &&
+                               capacity <= QW_PDF_READER_MAX_STREAM;
+                 ++attempt) {
+                size_t produced = 0u;
+                QwCompressionInflateStatus status;
+                output = (uint8_t *)malloc(capacity);
+                if (!output) {
+                    free(decrypted);
+                    return NULL;
+                }
+                status = qw_compression_inflate_zlib_bounded(
+                    decrypted, payload_size, output, capacity, &produced);
+                if (status == QW_COMPRESSION_INFLATE_OK) {
+                    free(decrypted);
+                    *out_size = produced;
+                    return output;
+                }
+                free(output);
+                if (status != QW_COMPRESSION_INFLATE_OUTPUT_FULL) {
+                    free(decrypted);
+                    return NULL;
+                }
+                capacity *= 2u;
+            }
+            free(decrypted);
+            return NULL;
+        }
+    }
     if (!flate) {
         output = (uint8_t *)malloc(payload_size);
         if (!output) return NULL;
@@ -756,11 +999,6 @@ int qw_mupdf_pdf_reader_open(const uint8_t *data, size_t size,
     *out_reader = NULL;
     *out_page_count = 0u;
     if (size < 8u || memcmp(data, "%PDF-", 5u) != 0) return QW_STATUS_ERR_FORMAT;
-    if (pdf_memmem((const char *)data, size, "/Encrypt", 8u)) {
-        if (report) snprintf(report->note, sizeof(report->note),
-                             "Encrypted PDF documents are not supported by the internal reader");
-        return QW_STATUS_ERR_UNSUPPORTED;
-    }
     reader = (QwMuPdfReader *)calloc(1u, sizeof(*reader));
     if (!reader) return QW_STATUS_ERR_OUT_OF_MEMORY;
     reader->data = data;
@@ -835,6 +1073,17 @@ int qw_mupdf_pdf_reader_open(const uint8_t *data, size_t size,
         if (report) snprintf(report->note, sizeof(report->note),
                              "No /Type /Page objects were found; compressed object streams are not supported");
         return QW_STATUS_ERR_UNSUPPORTED;
+    }
+    if (pdf_memmem((const char *)data, size, "/Encrypt", 8u)) {
+        int encryption_status;
+        reader->page_count = count;
+        encryption_status = pdf_setup_encryption(reader);
+        if (encryption_status == -1) {
+            pdf_reader_free(reader);
+            if (report) snprintf(report->note, sizeof(report->note),
+                                 "Encrypted PDF: unsupported security handler or wrong user password");
+            return QW_STATUS_ERR_UNSUPPORTED;
+        }
     }
     reader->page_count = count;
     *out_reader = reader;
