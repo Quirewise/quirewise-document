@@ -89,22 +89,34 @@ int main(void)
         free(single);
     }
 
-    /* Bad arguments and non-PDF inputs are rejected. */
-    CHECK(qw_mupdf_merge_pdf_documents(NULL, sizes, 2u, &merged, &merged_size, NULL,
-                                       NULL) == QW_STATUS_ERR_INVALID_ARGUMENT);
-    CHECK(qw_mupdf_merge_pdf_documents(inputs, sizes, 0u, &merged, &merged_size, NULL,
-                                       NULL) == QW_STATUS_ERR_INVALID_ARGUMENT);
+    /* Bad arguments and non-PDF inputs are rejected. These calls clear their
+     * output pointers, so the merged buffer must be released first. */
+    free(merged);
+    merged = NULL;
+    {
+        uint8_t *scratch = NULL;
+        size_t scratch_size = 0u;
+        CHECK(qw_mupdf_merge_pdf_documents(NULL, sizes, 2u, &scratch, &scratch_size,
+                                           NULL, NULL) ==
+              QW_STATUS_ERR_INVALID_ARGUMENT);
+        CHECK(qw_mupdf_merge_pdf_documents(inputs, sizes, 0u, &scratch, &scratch_size,
+                                           NULL, NULL) ==
+              QW_STATUS_ERR_INVALID_ARGUMENT);
+        CHECK(scratch == NULL && scratch_size == 0u);
+    }
     {
         const uint8_t junk[8] = {0u};
         const uint8_t *bad[1] = {junk};
         size_t bad_size[1] = {sizeof(junk)};
-        CHECK(qw_mupdf_merge_pdf_documents(bad, bad_size, 1u, &merged, &merged_size,
+        uint8_t *scratch = NULL;
+        size_t scratch_size = 0u;
+        CHECK(qw_mupdf_merge_pdf_documents(bad, bad_size, 1u, &scratch, &scratch_size,
                                            NULL, NULL) == QW_STATUS_ERR_FORMAT);
+        CHECK(scratch == NULL);
     }
 
     free(pdf_a);
     free(pdf_b);
-    free(merged);
     puts("PASS: PDF merge produces a readable two-page document with text from both inputs");
     return 0;
 }
