@@ -116,9 +116,6 @@ static int odt_fodt_probe(const void *data, size_t size)
 }
 
 #if defined(QUIREWISE_WITH_MUPDF) || defined(QUIREWISE_STANDALONE_ODT)
-#if defined(QUIREWISE_WITH_MUPDF)
-#include <mupdf/fitz.h>
-#endif
 
 enum {
     ODT_XML_LIMIT = 64 * 1024 * 1024,
