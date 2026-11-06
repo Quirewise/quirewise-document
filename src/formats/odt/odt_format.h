@@ -8,6 +8,12 @@ extern const QwFormatDescriptor qw_format_odt;
 extern const QwFormatDescriptor qw_format_ott;
 extern const QwFormatDescriptor qw_format_fodt;
 
+/* Internal helper: build the layout HTML used by the PDF renderer. */
+int qw_odt_parse_native_html(const void *data, size_t size,
+                             QwInputFormat input_format,
+                             uint8_t **out_html, size_t *out_html_size,
+                             QwConvertReport *report);
+
 int qw_odt_native_open_layout(const void *data, size_t size,
                              QwInputFormat input_format,
                              const QwConvertOptions *options,

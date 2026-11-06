@@ -943,23 +943,6 @@ int qw_mupdf_render_pdf_page(const uint8_t *data, size_t size, size_t page_index
     return rc;
 }
 
-int qw_mupdf_convert_memory(const uint8_t *data, size_t size,
-                            const char *input_extension, int reflow_epub,
-                            uint8_t **out_pdf, size_t *out_size,
-                            QwConvertReport *report)
-{
-    (void)data;
-    (void)size;
-    (void)input_extension;
-    (void)reflow_epub;
-    if (out_pdf) *out_pdf = NULL;
-    if (out_size) *out_size = 0u;
-    if (report) snprintf(report->note, sizeof(report->note),
-                         "Generic document-to-PDF conversion must go through the format packages; "
-                         "the internal backend only renders layout HTML");
-    return QW_STATUS_ERR_UNSUPPORTED;
-}
-
 int qw_mupdf_convert_memory_with_outline(const uint8_t *data, size_t size,
                                          const char *input_extension,
                                          const QwMuPdfOutlineItem *outline,

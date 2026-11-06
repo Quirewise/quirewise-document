@@ -985,6 +985,34 @@ int qw_odt_native_open_layout(const void *data, size_t size,
 /* The PDF path is served by the internal Quirewise HTML/PDF writer in
  * src/backends/layout_pdf.c; no external MuPDF code is involved. */
 #if 1
+int qw_odt_parse_native_html(const void *data, size_t size,
+                             QwInputFormat input_format,
+                             uint8_t **out_html, size_t *out_html_size,
+                             QwConvertReport *report)
+{
+    OdtHtml html = {0};
+    size_t skipped_images = 0u;
+    int rc;
+    QwInputFormat resolved = input_format;
+    if (!out_html || !out_html_size) return QW_STATUS_ERR_INVALID_ARGUMENT;
+    *out_html = NULL;
+    *out_html_size = 0u;
+    if (!data || !size) return QW_STATUS_ERR_INVALID_ARGUMENT;
+    if (resolved != QW_FORMAT_ODT && resolved != QW_FORMAT_OTT &&
+        resolved != QW_FORMAT_FODT) {
+        resolved = (size >= 5u && memcmp(data, "<?xml", 5u) == 0) ? QW_FORMAT_FODT
+                                                                 : QW_FORMAT_ODT;
+    }
+    rc = odt_build_layout_html(data, size, resolved, &html, &skipped_images, report);
+    if (rc != QW_STATUS_OK) {
+        free(html.data);
+        return rc;
+    }
+    *out_html = (uint8_t *)html.data;
+    *out_html_size = html.size;
+    return QW_STATUS_OK;
+}
+
 static int odt_convert_to_pdf(const void *data, size_t size,
                               const QwConvertOptions *options,
                               uint8_t **out_pdf, size_t *out_size,

@@ -17,6 +17,8 @@
 
 #include "format_registry.h"
 #include "../backends/mupdf_backend.h"
+#include "../formats/odt/odt_format.h"
+#include "../formats/docx/docx_format.h"
 
 #include <stdint.h>
 #include <stdio.h>
@@ -123,4 +125,112 @@ int qw_convert_to_pdf_memory(const void *data, size_t size,
                  "No internal PDF renderer for this input format");
     }
     return QW_STATUS_ERR_UNSUPPORTED;
+}
+
+/* Map the historical MuPDF "convert memory" entry onto the internal writers. */
+int qw_mupdf_convert_memory(const uint8_t *data, size_t size,
+                            const char *input_extension, int reflow_epub,
+                            uint8_t **out_pdf, size_t *out_size,
+                            QwConvertReport *report)
+{
+    uint8_t *html = NULL;
+    size_t html_size = 0u;
+    char *docx_html = NULL;
+    size_t docx_html_size = 0u;
+    QwDocxPageLayout layout;
+    int rc = QW_STATUS_OK;
+    int is_docx = 0;
+    int is_odt = 0;
+    int is_html = 0;
+    int is_pdf = 0;
+    const char *extension = input_extension ? input_extension : "";
+
+    if (!out_pdf || !out_size) return QW_STATUS_ERR_INVALID_ARGUMENT;
+    *out_pdf = NULL;
+    *out_size = 0u;
+    if (!data || !size) return QW_STATUS_ERR_INVALID_ARGUMENT;
+    if (reflow_epub) {
+        if (report) {
+            snprintf(report->note, sizeof(report->note),
+                     "EPUB reflow is not implemented by the internal renderer");
+        }
+        return QW_STATUS_ERR_UNSUPPORTED;
+    }
+
+    if (convert_region_equals(data, size, 0u, "%PDF-")) is_pdf = 1;
+    else if (convert_region_equals(data, size, 0u, "PK\x03\x04")) {
+        if (strstr(extension, "docx") || strstr(extension, "docm") ||
+            strstr(extension, "dotx")) {
+            is_docx = 1;
+        } else if (strstr(extension, "odt") || strstr(extension, "ott")) {
+            is_odt = 1;
+        } else {
+            is_docx = qw_docx_probe(data, size) != 0;
+            is_odt = !is_docx;
+        }
+    } else if (convert_region_equals(data, size, 0u, "<?xml") ||
+               contains_text((const char *)data, size, "office:document")) {
+        is_odt = 1;
+    } else if (data[0] == '<' &&
+               (contains_text((const char *)data, size, "<html") ||
+                contains_text((const char *)data, size, "<p") ||
+                contains_text((const char *)data, size, "<h1"))) {
+        is_html = 1;
+    } else {
+        if (report) snprintf(report->note, sizeof(report->note),
+                             "No internal renderer for this input");
+        return QW_STATUS_ERR_UNSUPPORTED;
+    }
+
+    if (is_pdf) {
+        uint8_t *copy = (uint8_t *)malloc(size);
+        if (!copy) return QW_STATUS_ERR_OUT_OF_MEMORY;
+        memcpy(copy, data, size);
+        *out_pdf = copy;
+        *out_size = size;
+        if (report) snprintf(report->note, sizeof(report->note),
+                             "Input already is a PDF document; passed through");
+        return QW_STATUS_OK;
+    }
+    memset(&layout, 0, sizeof(layout));
+    if (is_docx) {
+        rc = qw_docx_parse_native_html(data, size, &docx_html, &docx_html_size,
+                                       &layout);
+        if (rc != QW_STATUS_OK) {
+            if (report) snprintf(report->note, sizeof(report->note),
+                                 "DOCX layout extraction failed (%d)", rc);
+            return rc;
+        }
+        html = (uint8_t *)docx_html;
+        html_size = docx_html_size;
+    } else if (is_odt) {
+        QwInputFormat format = QW_FORMAT_ODT;
+        if (convert_region_equals(data, size, 0u, "<?xml")) format = QW_FORMAT_FODT;
+        rc = qw_odt_parse_native_html(data, size, format, &html, &html_size, report);
+        if (rc != QW_STATUS_OK) return rc;
+    } else if (is_html) {
+        html = (uint8_t *)malloc(size);
+        if (!html) return QW_STATUS_ERR_OUT_OF_MEMORY;
+        memcpy(html, data, size);
+        html_size = size;
+    }
+
+    if (!html) {
+        if (report) snprintf(report->note, sizeof(report->note),
+                             "No layout HTML produced for this input");
+        return QW_STATUS_ERR_FORMAT;
+    }
+
+    if (layout.width_twips > 0u && layout.height_twips > 0u) {
+        float width = (float)layout.width_twips / 20.0f;
+        float height = (float)layout.height_twips / 20.0f;
+        rc = qw_mupdf_convert_html_with_page_size((const char *)html, html_size,
+                                                  width, height, out_pdf, out_size,
+                                                  report);
+    } else {
+        rc = qw_mupdf_convert_html((const char *)html, html_size, out_pdf,
+                                   out_size, report);
+    }
+    free(html);
+    return rc;
 }
