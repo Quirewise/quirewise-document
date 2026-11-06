@@ -53,6 +53,20 @@ struct QwMuPdfReader {
     int text_ready;
 };
 
+static void pdf_reader_free(QwMuPdfReader *reader)
+{
+    size_t index;
+    if (!reader) return;
+    for (index = 0u; index < reader->buffer_count; ++index) {
+        free(reader->buffers[index]);
+    }
+    free(reader->buffers);
+    free(reader->slices);
+    free(reader->page_objects);
+    free(reader->text);
+    free(reader);
+}
+
 static int pdf_buffer_reserve(QwPdfBuffer *buffer, size_t needed)
 {
     size_t capacity;
@@ -759,9 +773,7 @@ int qw_mupdf_pdf_reader_open(const uint8_t *data, size_t size,
             if (!found) break;
             if (pdf_object_number_before(reader, found, &owner)) {
                 if (!pdf_register_object_stream(reader, owner)) {
-                    free(reader->slices);
-                    free(reader->page_objects);
-                    free(reader);
+                    pdf_reader_free(reader);
                     return QW_STATUS_ERR_OUT_OF_MEMORY;
                 }
             }
@@ -808,8 +820,7 @@ int qw_mupdf_pdf_reader_open(const uint8_t *data, size_t size,
                 size_t *resized = (size_t *)realloc(reader->page_objects,
                                                     grown * sizeof(*resized));
                 if (!resized) {
-                    free(reader->page_objects);
-                    free(reader);
+                    pdf_reader_free(reader);
                     return QW_STATUS_ERR_OUT_OF_MEMORY;
                 }
                 reader->page_objects = resized;
@@ -819,8 +830,7 @@ int qw_mupdf_pdf_reader_open(const uint8_t *data, size_t size,
         }
     }
     if (!count) {
-        free(reader->page_objects);
-        free(reader);
+        pdf_reader_free(reader);
         if (report) snprintf(report->note, sizeof(report->note),
                              "No /Type /Page objects were found; compressed object streams are not supported");
         return QW_STATUS_ERR_UNSUPPORTED;
@@ -915,16 +925,7 @@ int qw_mupdf_pdf_reader_render_page(QwMuPdfReader *reader, size_t page_index,
 
 void qw_mupdf_pdf_reader_close(QwMuPdfReader *reader)
 {
-    if (!reader) return;
-    size_t index;
-    for (index = 0u; index < reader->buffer_count; ++index) {
-        free(reader->buffers[index]);
-    }
-    free(reader->buffers);
-    free(reader->slices);
-    free(reader->page_objects);
-    free(reader->text);
-    free(reader);
+    pdf_reader_free(reader);
 }
 
 int qw_mupdf_render_pdf_page(const uint8_t *data, size_t size, size_t page_index,

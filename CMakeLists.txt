@@ -71,4 +71,13 @@ if(BUILD_TESTING)
     add_test(NAME quirewise_document_pdf_reader
         COMMAND quirewise_document_pdf_reader_test
             "${CMAKE_CURRENT_SOURCE_DIR}/../../external-consumer-template/fixtures/one-page.pdf")
+
+    add_executable(quirewise_document_pdf_fuzz_smoke tests/pdf_fuzz_smoke.c)
+    target_compile_features(quirewise_document_pdf_fuzz_smoke PRIVATE c_std_11)
+    target_include_directories(quirewise_document_pdf_fuzz_smoke PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}/src/backends")
+    target_link_libraries(quirewise_document_pdf_fuzz_smoke PRIVATE quirewise_document)
+    add_test(NAME quirewise_document_pdf_fuzz
+        COMMAND quirewise_document_pdf_fuzz_smoke 300
+            "${CMAKE_CURRENT_SOURCE_DIR}/../../external-consumer-template/fixtures/one-page.pdf")
 endif()
