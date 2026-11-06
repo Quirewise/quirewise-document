@@ -74,6 +74,15 @@ if(BUILD_TESTING)
     target_compile_definitions(quirewise_document_epub_pdf_test PRIVATE
         QUIREWISE_EPUB_FIXTURE="${CMAKE_CURRENT_SOURCE_DIR}/tests/data/reflow.epub")
     target_link_libraries(quirewise_document_epub_pdf_test PRIVATE quirewise_document)
+    add_executable(quirewise_document_raster_page_test
+        tests/raster_page_test.c)
+    target_compile_features(quirewise_document_raster_page_test PRIVATE c_std_11)
+    target_include_directories(quirewise_document_raster_page_test PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}/src/backends")
+    target_link_libraries(quirewise_document_raster_page_test PRIVATE quirewise_document)
+    add_test(NAME quirewise_document_raster_page
+        COMMAND quirewise_document_raster_page_test)
+
     add_test(NAME quirewise_document_epub_pdf
         COMMAND quirewise_document_epub_pdf_test)
 

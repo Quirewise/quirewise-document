@@ -101,12 +101,15 @@ int main(int argc, char **argv)
                                        strlen(encrypted_pdf), &encrypted, &pages,
                                        NULL) == QW_STATUS_ERR_UNSUPPORTED);
     }
-    /* Rasterisation is explicitly unimplemented. */
+    /* Rasterisation paints the page geometry and reports content loss. */
     {
         QwPageImage image;
+        memset(&image, 0, sizeof(image));
         CHECK(qw_mupdf_render_pdf_page(pdf, pdf_size, 0u, 144u, &image, NULL) ==
-              QW_STATUS_ERR_UNSUPPORTED);
-        CHECK(image.data == NULL && image.size == 0u);
+              QW_STATUS_OK);
+        CHECK(image.data != NULL && image.size > 0u);
+        CHECK(image.kind == QW_PAGE_IMAGE_RGB24);
+        free((void *)image.data);
     }
     free(pdf);
 

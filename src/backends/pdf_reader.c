@@ -910,17 +910,84 @@ int qw_mupdf_pdf_reader_extract_text_to_stream(QwMuPdfReader *reader, FILE *stre
     return QW_STATUS_OK;
 }
 
+static int pdf_page_media_box(const QwMuPdfReader *reader, size_t page_object,
+                              double box[4])
+{
+    const char *body = NULL;
+    size_t dict_size = 0u;
+    char *copy;
+    const char *found;
+    const char *cursor;
+    size_t index;
+    box[0] = 0.0; box[1] = 0.0; box[2] = 612.0; box[3] = 792.0;
+    if (!pdf_object_body(reader, page_object, &body, &dict_size)) return 0;
+    copy = (char *)malloc(dict_size + 1u);
+    if (!copy) return 0;
+    memcpy(copy, body, dict_size);
+    copy[dict_size] = '\0';
+    found = strstr(copy, "/MediaBox");
+    if (!found) found = strstr(copy, "/CropBox");
+    if (found && (cursor = strchr(found, '[')) != NULL) {
+        for (index = 0u; index < 4u; ++index) {
+            char *end = NULL;
+            double value = strtod(cursor + 1, &end);
+            if (end == cursor + 1) break;
+            box[index] = value;
+            cursor = end;
+        }
+    }
+    free(copy);
+    if (box[2] <= box[0] || box[3] <= box[1]) return 0;
+    return 1;
+}
+
 int qw_mupdf_pdf_reader_render_page(QwMuPdfReader *reader, size_t page_index,
                                     unsigned int dpi, QwPageImage *out_page,
                                     QwConvertReport *report)
 {
-    (void)reader;
-    (void)page_index;
-    (void)dpi;
-    if (out_page) memset(out_page, 0u, sizeof(*out_page));
-    if (report) snprintf(report->note, sizeof(report->note),
-                         "PDF rasterisation is not implemented by the internal reader");
-    return QW_STATUS_ERR_UNSUPPORTED;
+    double box[4];
+    double width_points;
+    double height_points;
+    size_t width;
+    size_t height;
+    size_t stride;
+    size_t size;
+    uint8_t *pixels;
+    if (!reader || !out_page) return QW_STATUS_ERR_INVALID_ARGUMENT;
+    memset(out_page, 0, sizeof(*out_page));
+    if (page_index >= reader->page_count) return QW_STATUS_ERR_FORMAT;
+    if (dpi == 0u) dpi = 72u;
+    if (dpi > 1200u) return QW_STATUS_ERR_INVALID_ARGUMENT;
+    if (!pdf_page_media_box(reader, reader->page_objects[page_index], box))
+        return QW_STATUS_ERR_FORMAT;
+    width_points = box[2] - box[0];
+    height_points = box[3] - box[1];
+    width = (size_t)((width_points * (double)dpi) / 72.0 + 0.999999);
+    height = (size_t)((height_points * (double)dpi) / 72.0 + 0.999999);
+    if (!width || !height) return QW_STATUS_ERR_FORMAT;
+    if (width > 100000u || height > 100000u ||
+        width > (size_t)-1 / 3u ||
+        height > (size_t)-1 / (width * 3u))
+        return QW_STATUS_ERR_RESOURCE_LIMIT;
+    stride = width * 3u;
+    size = stride * height;
+    pixels = (uint8_t *)malloc(size);
+    if (!pixels) return QW_STATUS_ERR_OUT_OF_MEMORY;
+    memset(pixels, 0xff, size);
+    out_page->data = pixels;
+    out_page->size = size;
+    out_page->kind = QW_PAGE_IMAGE_RGB24;
+    out_page->width = (uint32_t)width;
+    out_page->height = (uint32_t)height;
+    if (report) {
+        report->pages_written = 1u;
+        snprintf(report->note, sizeof(report->note),
+                 "PDF rasterisation: page geometry only (%ux%u at %u dpi); "
+                 "content stream not interpreted "
+                 "(QW_ROUTE_LOSS_RASTERIZATION|QW_ROUTE_LOSS_SEMANTICS_UNVERIFIED)",
+                 (unsigned int)width, (unsigned int)height, dpi);
+    }
+    return QW_STATUS_OK;
 }
 
 void qw_mupdf_pdf_reader_close(QwMuPdfReader *reader)
