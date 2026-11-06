@@ -345,14 +345,12 @@ int qw_mupdf_merge_pdf_documents(const uint8_t *const *pdfs, const size_t *sizes
         inputs[input_index].size = size;
         inputs[input_index].page_start = page_total;
         has_compressed_objects =
-            merge_find_typed(data, size, "ObjStm") != NULL ||
-            merge_memmem(data, size, "/Type/XRef", 10u) != NULL ||
-            merge_memmem(data, size, "/Type /XRef", 11u) != NULL;
+            merge_find_typed(data, size, "ObjStm") != NULL;
         if (has_compressed_objects) {
             rc = QW_STATUS_ERR_UNSUPPORTED;
             if (report) {
                 snprintf(report->note, sizeof(report->note),
-                         "PDF merging does not support documents with object or xref streams");
+                         "PDF merging does not support documents with compressed object streams");
             }
             goto cleanup;
         }

@@ -120,6 +120,15 @@ if(BUILD_TESTING)
     target_include_directories(quirewise_document_merge_metadata_test PRIVATE
         "${CMAKE_CURRENT_SOURCE_DIR}/src/backends")
     target_link_libraries(quirewise_document_merge_metadata_test PRIVATE quirewise_document)
+    add_executable(quirewise_document_merge_xref_stream_test
+        tests/merge_xref_stream_test.c)
+    target_compile_features(quirewise_document_merge_xref_stream_test PRIVATE c_std_11)
+    target_include_directories(quirewise_document_merge_xref_stream_test PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}/src/backends")
+    target_link_libraries(quirewise_document_merge_xref_stream_test PRIVATE quirewise_document)
+    add_test(NAME quirewise_document_merge_xref_stream
+        COMMAND quirewise_document_merge_xref_stream_test)
+
     add_test(NAME quirewise_document_merge_metadata
         COMMAND quirewise_document_merge_metadata_test)
 
