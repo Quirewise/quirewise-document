@@ -910,6 +910,196 @@ int qw_mupdf_pdf_reader_extract_text_to_stream(QwMuPdfReader *reader, FILE *stre
     return QW_STATUS_OK;
 }
 
+
+typedef struct PdfMatrix {
+    double a, b, c, d, e, f;
+} PdfMatrix;
+
+static void pdf_matrix_reset(PdfMatrix *m)
+{
+    m->a = 1.0; m->b = 0.0; m->c = 0.0; m->d = 1.0; m->e = 0.0; m->f = 0.0;
+}
+
+static void pdf_matrix_concat(PdfMatrix *m, const double n[6])
+{
+    PdfMatrix result;
+    result.a = m->a * n[0] + m->b * n[2];
+    result.b = m->a * n[1] + m->b * n[3];
+    result.c = m->c * n[0] + m->d * n[2];
+    result.d = m->c * n[1] + m->d * n[3];
+    result.e = m->e * n[0] + m->f * n[2] + n[4];
+    result.f = m->e * n[1] + m->f * n[3] + n[5];
+    *m = result;
+}
+
+static void pdf_paint_rect(uint8_t *pixels, size_t width, size_t height,
+                           const PdfMatrix *ctm, double x, double y,
+                           double rect_width, double rect_height,
+                           const uint8_t rgb[3])
+{
+    double x0 = x, y0 = y, x1 = x + rect_width, y1 = y + rect_height;
+    double px0, py0, px1, py1;
+    size_t left, right, top, bottom, row, column;
+    if (ctm->b != 0.0 || ctm->c != 0.0) return;
+    px0 = ctm->a * x0 + ctm->e;
+    px1 = ctm->a * x1 + ctm->e;
+    py0 = ctm->d * y0 + ctm->f;
+    py1 = ctm->d * y1 + ctm->f;
+    if (px0 > px1) { double swap = px0; px0 = px1; px1 = swap; }
+    if (py0 > py1) { double swap = py0; py0 = py1; py1 = swap; }
+    left = px0 < 0.0 ? 0u : (size_t)px0;
+    right = px1 > (double)width ? width : (size_t)(px1 + 0.999);
+    bottom = py0 < 0.0 ? 0u : (size_t)py0;
+    top = py1 > (double)height ? height : (size_t)(py1 + 0.999);
+    if (left >= right || bottom >= top) return;
+    for (row = bottom; row < top; ++row) {
+        size_t inverted = height - 1u - row;
+        if (inverted >= height) continue;
+        for (column = left; column < right; ++column) {
+            size_t offset = (inverted * width + column) * 3u;
+            pixels[offset + 0u] = rgb[0];
+            pixels[offset + 1u] = rgb[1];
+            pixels[offset + 2u] = rgb[2];
+        }
+    }
+}
+
+static int pdf_paint_content(const uint8_t *stream, size_t size,
+                             uint8_t *pixels, size_t width, size_t height,
+                             size_t *painted, int *skipped_text_or_image)
+{
+    size_t position = 0u;
+    PdfMatrix ctm;
+    PdfMatrix stack[32];
+    size_t depth = 0u;
+    uint8_t fill[3] = {0u, 0u, 0u};
+    double numbers[8];
+    size_t number_count = 0u;
+    pdf_matrix_reset(&ctm);
+    while (position < size) {
+        char ch = (char)stream[position];
+        if (ch == '%') {
+            while (position < size && stream[position] != '\n' &&
+                   stream[position] != '\r') ++position;
+            continue;
+        }
+        if (ch == ' ' || ch == '\t' || ch == '\r' || ch == '\n' ||
+            ch == '\f' || ch == '\0') {
+            ++position;
+            continue;
+        }
+        if ((ch >= '0' && ch <= '9') || ch == '-' || ch == '+' || ch == '.' ||
+            ch == '(' || ch == '[' || ch == ']' || ch == '<' || ch == '>' ||
+            ch == '/') {
+            if (ch == '(') {
+                int level = 1;
+                ++position;
+                while (position < size && level > 0) {
+                    if (stream[position] == '\\' && position + 1u < size) {
+                        position += 2u;
+                        continue;
+                    }
+                    if (stream[position] == '(') ++level;
+                    else if (stream[position] == ')') --level;
+                    ++position;
+                }
+                continue;
+            }
+            if (ch == '[' || ch == ']' || ch == '<' || ch == '>') {
+                ++position;
+                continue;
+            }
+            if (ch == '/') {
+                while (position < size && (unsigned char)stream[position] > 32u)
+                    ++position;
+                continue;
+            }
+            {
+                char *end = NULL;
+                double value = strtod((const char *)stream + position, &end);
+                if (end && end != (char *)stream + position) {
+                    if (number_count < 8u) numbers[number_count++] = value;
+                    position = (size_t)(end - (const char *)stream);
+                    continue;
+                }
+            }
+            ++position;
+            continue;
+        }
+        if ((ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') ||
+            ch == '*' || ch == '\'' || ch == '"') {
+            char operator_name[4];
+            size_t operator_length = 0u;
+            while (position < size && operator_length < 3u &&
+                   (((unsigned char)stream[position] >= 'a' &&
+                     (unsigned char)stream[position] <= 'z') ||
+                    ((unsigned char)stream[position] >= 'A' &&
+                     (unsigned char)stream[position] <= 'Z') ||
+                    stream[position] == '*' || stream[position] == '\'' ||
+                    stream[position] == '"')) {
+                operator_name[operator_length++] =
+                    (char)stream[position++];
+            }
+            operator_name[operator_length] = '\0';
+            if (strcmp(operator_name, "q") == 0 && depth < 32u) {
+                stack[depth++] = ctm;
+            } else if (strcmp(operator_name, "Q") == 0 && depth > 0u) {
+                ctm = stack[--depth];
+            } else if (strcmp(operator_name, "cm") == 0 && number_count >= 6u) {
+                double matrix[6];
+                size_t index;
+                for (index = 0u; index < 6u; ++index)
+                    matrix[index] = numbers[number_count - 6u + index];
+                pdf_matrix_concat(&ctm, matrix);
+            } else if ((strcmp(operator_name, "rg") == 0 ||
+                        strcmp(operator_name, "RG") == 0) &&
+                       number_count >= 3u) {
+                size_t index;
+                for (index = 0u; index < 3u; ++index) {
+                    double value = numbers[number_count - 3u + index];
+                    fill[index] = (uint8_t)(value <= 0.0
+                                                ? 0
+                                                : value >= 1.0
+                                                      ? 255
+                                                      : (int)(value * 255.0 + 0.5));
+                }
+            } else if ((strcmp(operator_name, "g") == 0 ||
+                        strcmp(operator_name, "G") == 0) &&
+                       number_count >= 1u) {
+                double value = numbers[number_count - 1u];
+                uint8_t gray = (uint8_t)(value <= 0.0
+                                             ? 0
+                                             : value >= 1.0
+                                                   ? 255
+                                                   : (int)(value * 255.0 + 0.5));
+                fill[0] = gray; fill[1] = gray; fill[2] = gray;
+            } else if (strcmp(operator_name, "re") == 0 && number_count >= 4u) {
+                pdf_paint_rect(pixels, width, height, &ctm,
+                               numbers[number_count - 4u],
+                               numbers[number_count - 3u],
+                               numbers[number_count - 2u],
+                               numbers[number_count - 1u], fill);
+                ++*painted;
+            } else if (strcmp(operator_name, "f") == 0 ||
+                       strcmp(operator_name, "F") == 0 ||
+                       strcmp(operator_name, "f*") == 0 ||
+                       strcmp(operator_name, "S") == 0 ||
+                       strcmp(operator_name, "s") == 0) {
+                /* rectangles already painted at `re` time */
+            } else if (strcmp(operator_name, "BT") == 0 ||
+                       strcmp(operator_name, "Do") == 0 ||
+                       strcmp(operator_name, "Tj") == 0 ||
+                       strcmp(operator_name, "TJ") == 0) {
+                *skipped_text_or_image = 1;
+            }
+            number_count = 0u;
+            continue;
+        }
+        ++position;
+    }
+    return 1;
+}
+
 static int pdf_page_media_box(const QwMuPdfReader *reader, size_t page_object,
                               double box[4])
 {
@@ -979,13 +1169,41 @@ int qw_mupdf_pdf_reader_render_page(QwMuPdfReader *reader, size_t page_index,
     out_page->kind = QW_PAGE_IMAGE_RGB24;
     out_page->width = (uint32_t)width;
     out_page->height = (uint32_t)height;
-    if (report) {
-        report->pages_written = 1u;
-        snprintf(report->note, sizeof(report->note),
-                 "PDF rasterisation: page geometry only (%ux%u at %u dpi); "
-                 "content stream not interpreted "
-                 "(QW_ROUTE_LOSS_RASTERIZATION|QW_ROUTE_LOSS_SEMANTICS_UNVERIFIED)",
-                 (unsigned int)width, (unsigned int)height, dpi);
+    {
+        const char *body = NULL;
+        size_t dict_size = 0u;
+        size_t contents = 0u;
+        size_t painted = 0u;
+        int skipped_text_or_image = 0;
+        if (pdf_object_body(reader, reader->page_objects[page_index], &body,
+                            &dict_size)) {
+            char *dict = (char *)malloc(dict_size + 1u);
+            if (dict) {
+                memcpy(dict, body, dict_size);
+                dict[dict_size] = '\0';
+                if (pdf_find_reference(dict, dict_size, "/Contents", &contents)) {
+                    size_t stream_size = 0u;
+                    uint8_t *stream = pdf_object_stream(reader, contents,
+                                                        &stream_size);
+                    if (stream) {
+                        (void)pdf_paint_content(stream, stream_size, pixels,
+                                                width, height, &painted,
+                                                &skipped_text_or_image);
+                        free(stream);
+                    }
+                }
+                free(dict);
+            }
+        }
+        if (report) {
+            report->pages_written = 1u;
+            snprintf(report->note, sizeof(report->note),
+                     "PDF rasterisation: %ux%u at %u dpi; %zu filled rectangle(s) "
+                     "painted%s (QW_ROUTE_LOSS_RASTERIZATION|"
+                     "QW_ROUTE_LOSS_SEMANTICS_UNVERIFIED)",
+                     (unsigned int)width, (unsigned int)height, dpi, painted,
+                     skipped_text_or_image ? "; text/images not painted" : "");
+        }
     }
     return QW_STATUS_OK;
 }
