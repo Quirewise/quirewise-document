@@ -114,6 +114,15 @@ if(BUILD_TESTING)
     target_compile_definitions(quirewise_document_encrypted_pdf_test PRIVATE
         QUIREWISE_ENCRYPTED_PDF="${CMAKE_CURRENT_SOURCE_DIR}/tests/data/encrypted-rc4.pdf")
     target_link_libraries(quirewise_document_encrypted_pdf_test PRIVATE quirewise_document)
+    add_executable(quirewise_document_merge_metadata_test
+        tests/merge_metadata_test.c)
+    target_compile_features(quirewise_document_merge_metadata_test PRIVATE c_std_11)
+    target_include_directories(quirewise_document_merge_metadata_test PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}/src/backends")
+    target_link_libraries(quirewise_document_merge_metadata_test PRIVATE quirewise_document)
+    add_test(NAME quirewise_document_merge_metadata
+        COMMAND quirewise_document_merge_metadata_test)
+
     add_test(NAME quirewise_document_encrypted_pdf
         COMMAND quirewise_document_encrypted_pdf_test)
 

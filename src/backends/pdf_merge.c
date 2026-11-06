@@ -45,6 +45,9 @@ typedef struct QwMergeInput {
     size_t max_object_number;
     size_t page_start;
     size_t page_count;
+    size_t info_object;
+    size_t outline_object;
+    size_t metadata_object;
 } QwMergeInput;
 
 static const char *merge_memmem(const char *haystack, size_t haystack_size,
@@ -114,6 +117,25 @@ static int merge_number_before(const char *base, const char *position,
         --cursor;
     }
     return 0;
+}
+
+
+static size_t merge_find_ref(const char *data, size_t size, const char *tag)
+{
+    size_t tag_size = strlen(tag);
+    size_t position = 0u;
+    while (position + tag_size < size) {
+        const char *found = merge_memmem(data + position, size - position, tag,
+                                          tag_size);
+        char *end = NULL;
+        unsigned long number;
+        if (!found) return 0u;
+        number = strtoul(found + tag_size, &end, 10);
+        if (end != found + tag_size && number > 0u && number < 1000000u)
+            return (size_t)number;
+        position = (size_t)(found - data) + tag_size;
+    }
+    return 0u;
 }
 
 static int merge_collect_objects(const QwMergeInput *input, size_t input_index,
@@ -386,6 +408,16 @@ int qw_mupdf_merge_pdf_documents(const uint8_t *const *pdfs, const size_t *sizes
             inputs[input_index].max_object_number = largest;
             inputs[input_index].object_offset = running_offset;
             inputs[input_index].page_count = pages_found;
+            {
+                const char *raw = (const char *)inputs[input_index].data;
+                size_t raw_size = inputs[input_index].size;
+                inputs[input_index].info_object =
+                    merge_find_ref(raw, raw_size, "/Info ");
+                inputs[input_index].outline_object =
+                    merge_find_ref(raw, raw_size, "/Outlines ");
+                inputs[input_index].metadata_object =
+                    merge_find_ref(raw, raw_size, "/Metadata ");
+            }
             running_offset += largest + 2u;
             page_total += pages_found;
         }
@@ -482,9 +514,29 @@ int qw_mupdf_merge_pdf_documents(const uint8_t *const *pdfs, const size_t *sizes
             }
         }
         xref_offsets[catalog_object] = position;
-        position += (size_t)snprintf((char *)merged + position, capacity - position,
-                                     "%zu 0 obj\n<< /Type /Catalog /Pages %zu 0 R >>\nendobj\n",
-                                     catalog_object, pages_object);
+        {
+            char extra[160];
+            size_t used = 0u;
+            size_t outline_ref =
+                inputs[0].outline_object
+                    ? inputs[0].outline_object + inputs[0].object_offset
+                    : 0u;
+            size_t metadata_ref =
+                inputs[0].metadata_object
+                    ? inputs[0].metadata_object + inputs[0].object_offset
+                    : 0u;
+            extra[0] = '\0';
+            if (outline_ref)
+                used += (size_t)snprintf(extra + used, sizeof(extra) - used,
+                                         " /Outlines %zu 0 R", outline_ref);
+            if (metadata_ref && used < sizeof(extra))
+                used += (size_t)snprintf(extra + used, sizeof(extra) - used,
+                                         " /Metadata %zu 0 R", metadata_ref);
+            position += (size_t)snprintf(
+                (char *)merged + position, capacity - position,
+                "%zu 0 obj\n<< /Type /Catalog /Pages %zu 0 R%s >>\nendobj\n",
+                catalog_object, pages_object, extra);
+        }
         xref_offsets[pages_object] = position;
         position += (size_t)snprintf((char *)merged + position, capacity - position,
                                      "%zu 0 obj\n<< /Type /Pages /Count %zu /Kids [",
@@ -519,10 +571,20 @@ int qw_mupdf_merge_pdf_documents(const uint8_t *const *pdfs, const size_t *sizes
                                                  "0000000000 65535 f \n");
                 }
             }
+            {
+            char info[64];
+            size_t info_ref =
+                inputs[0].info_object
+                    ? inputs[0].info_object + inputs[0].object_offset
+                    : 0u;
+            info[0] = '\0';
+            if (info_ref)
+                snprintf(info, sizeof(info), " /Info %zu 0 R", info_ref);
             position += (size_t)snprintf(
                 (char *)merged + position, capacity - position,
-                "trailer\n<< /Size %zu /Root %zu 0 R >>\nstartxref\n%zu\n%%%%EOF\n",
-                object_total + 1u, catalog_object, xref_offset);
+                "trailer\n<< /Size %zu /Root %zu 0 R%s >>\nstartxref\n%zu\n%%%%EOF\n",
+                object_total + 1u, catalog_object, info, xref_offset);
+         }
             merged_size = position;
         }
     }
