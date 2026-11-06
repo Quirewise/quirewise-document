@@ -12,6 +12,7 @@
  * does not provide yet. No MuPDF code is involved. */
 
 #include "mupdf_backend.h"
+#include <quirewise/compression.h>
 
 #include <ctype.h>
 #include <stdint.h>
@@ -136,6 +137,184 @@ static size_t merge_find_ref(const char *data, size_t size, const char *tag)
         position = (size_t)(found - data) + tag_size;
     }
     return 0u;
+}
+
+
+static long merge_parse_dict_int(const char *dict, size_t size, const char *tag,
+                                 long fallback)
+{
+    const char *found = merge_memmem(dict, size, tag, strlen(tag));
+    char *end = NULL;
+    long value;
+    if (!found) return fallback;
+    value = strtol(found + strlen(tag), &end, 10);
+    if (end == found + strlen(tag)) return fallback;
+    return value;
+}
+
+static int merge_append_bytes(uint8_t **buffer, size_t *size, size_t *capacity,
+                              const void *data, size_t length)
+{
+    uint8_t *grown;
+    if (*size + length > *capacity) {
+        size_t next = *capacity ? *capacity : 1u << 16;
+        while (next < *size + length) next *= 2u;
+        grown = (uint8_t *)realloc(*buffer, next);
+        if (!grown) return 0;
+        *buffer = grown;
+        *capacity = next;
+    }
+    memcpy(*buffer + *size, data, length);
+    *size += length;
+    return 1;
+}
+
+static int merge_expand_object_streams(const uint8_t *data, size_t size,
+                                       uint8_t **out_data, size_t *out_size)
+{
+    const char *text = (const char *)data;
+    size_t position = 0u;
+    uint8_t *buffer = NULL;
+    size_t length = 0u;
+    size_t capacity = 0u;
+    int expanded = 0;
+    *out_data = NULL;
+    *out_size = 0u;
+    while (position + 6u < size) {
+        const char *marker = merge_memmem(text + position, size - position,
+                                          " 0 obj", 6u);
+        const char *body;
+        const char *stream;
+        const char *dict_end;
+        long object_count, first_offset, stream_length;
+        const uint8_t *payload;
+        size_t payload_size;
+        uint8_t *decoded = NULL;
+        size_t decoded_size = 0u;
+        int flate;
+        long index;
+        long *numbers;
+        long *offsets;
+        size_t body_start;
+        if (!marker) break;
+        {
+            const char *digits = marker;
+            while (digits > text && isdigit((unsigned char)digits[-1])) --digits;
+            if (digits == marker) { position = (size_t)(marker - text) + 6u; continue; }
+        }
+        body = marker + 6u;
+        dict_end = merge_memmem(body, size - (size_t)(body - text), "stream", 6u);
+        if (!dict_end ||
+            !merge_memmem(body, (size_t)(dict_end - body), "/ObjStm", 7u)) {
+            position = (size_t)(marker - text) + 6u;
+            continue;
+        }
+        object_count = merge_parse_dict_int(body, (size_t)(dict_end - body),
+                                            "/N", -1);
+        first_offset = merge_parse_dict_int(body, (size_t)(dict_end - body),
+                                            "/First", -1);
+        stream_length = merge_parse_dict_int(body, (size_t)(dict_end - body),
+                                             "/Length", -1);
+        flate = merge_memmem(body, (size_t)(dict_end - body), "/FlateDecode",
+                             12u) != NULL;
+        stream = dict_end + 6u;
+        while ((size_t)(stream - text) < size &&
+               (*stream == '\r' || *stream == '\n'))
+            ++stream;
+        payload = (const uint8_t *)stream;
+        payload_size = stream_length > 0
+                           ? (size_t)stream_length
+                           : size - (size_t)(stream - text);
+        if (object_count <= 0 || object_count > 1024 || first_offset < 0 ||
+            payload_size > QW_MERGE_MAX_INPUT ||
+            (size_t)(stream - text) + payload_size > size)
+            return 0;
+        if (flate) {
+            size_t cap = payload_size * 6u + 1024u;
+            size_t attempt;
+            for (attempt = 0u; attempt < 4u; ++attempt) {
+                size_t produced = 0u;
+                QwCompressionInflateStatus status;
+                decoded = (uint8_t *)malloc(cap);
+                if (!decoded) return 0;
+                status = qw_compression_inflate_zlib_bounded(
+                    payload, payload_size, decoded, cap, &produced);
+                if (status == QW_COMPRESSION_INFLATE_OK) {
+                    decoded_size = produced;
+                    break;
+                }
+                free(decoded);
+                decoded = NULL;
+                if (status != QW_COMPRESSION_INFLATE_OUTPUT_FULL) return 0;
+                cap *= 2u;
+            }
+            if (!decoded) return 0;
+            payload = decoded;
+            payload_size = decoded_size;
+        }
+        numbers = (long *)calloc((size_t)object_count, sizeof(*numbers));
+        offsets = (long *)calloc((size_t)object_count, sizeof(*offsets));
+        if (!numbers || !offsets) {
+            free(numbers); free(offsets); free(decoded); return 0;
+        }
+        {
+            size_t cursor = 0u;
+            for (index = 0; index < object_count; ++index) {
+                char *end = NULL;
+                numbers[index] = strtol((const char *)payload + cursor, &end, 10);
+                cursor = (size_t)(end - (const char *)payload);
+                offsets[index] = strtol((const char *)payload + cursor, &end, 10);
+                cursor = (size_t)(end - (const char *)payload);
+                if (cursor > (size_t)first_offset) {
+                    free(numbers); free(offsets); free(decoded); return 0;
+                }
+            }
+        }
+        body_start = (size_t)first_offset;
+        for (index = 0; index < object_count; ++index) {
+            size_t start = body_start + (size_t)offsets[index];
+            size_t end = index + 1 < object_count
+                             ? body_start + (size_t)offsets[index + 1]
+                             : payload_size;
+            char header[64];
+            int header_length;
+            if (start >= end || end > payload_size) continue;
+            header_length = snprintf(header, sizeof(header), "\n%ld 0 obj\n",
+                                     numbers[index]);
+            if (!merge_append_bytes(&buffer, &length, &capacity, header,
+                                    (size_t)header_length) ||
+                !merge_append_bytes(&buffer, &length, &capacity,
+                                    payload + start, end - start) ||
+                !merge_append_bytes(&buffer, &length, &capacity, "\nendobj\n",
+                                    8u)) {
+                free(numbers); free(offsets); free(decoded);
+                free(buffer);
+                return 0;
+            }
+        }
+        free(numbers);
+        free(offsets);
+        free(decoded);
+        expanded = 1;
+        position = (size_t)(stream - text) + payload_size;
+    }
+    if (!expanded) {
+        free(buffer);
+        return 1; /* no object streams: caller keeps the original input */
+    }
+    {
+        uint8_t *result = (uint8_t *)malloc(size + length);
+        if (!result) {
+            free(buffer);
+            return 0;
+        }
+        memcpy(result, data, size);
+        memcpy(result + size, buffer, length);
+        free(buffer);
+        *out_data = result;
+        *out_size = size + length;
+    }
+    return 2;
 }
 
 static int merge_collect_objects(const QwMergeInput *input, size_t input_index,
@@ -298,6 +477,7 @@ int qw_mupdf_merge_pdf_documents(const uint8_t *const *pdfs, const size_t *sizes
     QwMergeInput *inputs = NULL;
     QwMergeObject **objects = NULL;
     size_t *object_counts = NULL;
+    uint8_t **expanded = NULL;
     QwMergePage *pages = NULL;
     size_t *xref_offsets = NULL;
     size_t page_total = 0u;
@@ -330,6 +510,7 @@ int qw_mupdf_merge_pdf_documents(const uint8_t *const *pdfs, const size_t *sizes
     inputs = (QwMergeInput *)calloc(count, sizeof(*inputs));
     objects = (QwMergeObject **)calloc(count, sizeof(*objects));
     object_counts = (size_t *)calloc(count, sizeof(*object_counts));
+    expanded = (uint8_t **)calloc(count, sizeof(*expanded));
     if (!inputs || !objects || !object_counts) {
         rc = QW_STATUS_ERR_OUT_OF_MEMORY;
         goto cleanup;
@@ -347,12 +528,23 @@ int qw_mupdf_merge_pdf_documents(const uint8_t *const *pdfs, const size_t *sizes
         has_compressed_objects =
             merge_find_typed(data, size, "ObjStm") != NULL;
         if (has_compressed_objects) {
-            rc = QW_STATUS_ERR_UNSUPPORTED;
-            if (report) {
-                snprintf(report->note, sizeof(report->note),
-                         "PDF merging does not support documents with compressed object streams");
-            }
+            uint8_t *expanded_data = NULL;
+            size_t expanded_size = 0u;
+            int expand_status =
+                merge_expand_object_streams(data, size, &expanded_data,
+                                            &expanded_size);
+            if (expand_status == 2) {
+                expanded[input_index] = expanded_data;
+                inputs[input_index].data = expanded_data;
+                inputs[input_index].size = expanded_size;
+            } else if (expand_status == 0) {
+                rc = QW_STATUS_ERR_UNSUPPORTED;
+                if (report) {
+                    snprintf(report->note, sizeof(report->note),
+                             "PDF merging could not expand compressed object streams");
+                }
             goto cleanup;
+        }
         }
         if (!merge_collect_objects(&inputs[input_index], input_index,
                                    &objects[input_index], &object_counts[input_index])) {
@@ -604,6 +796,11 @@ cleanup:
         }
     }
     free(objects);
+    if (expanded) {
+        size_t index;
+        for (index = 0u; index < count; ++index) free(expanded[index]);
+        free(expanded);
+    }
     free(object_counts);
     free(inputs);
     free(pages);

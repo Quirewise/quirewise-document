@@ -1025,7 +1025,19 @@ int qw_mupdf_pdf_reader_open(const uint8_t *data, size_t size,
         size_t remaining = size;
         while (remaining > 6u) {
             const char *found = pdf_find_typed(cursor, remaining, "Page");
+            const char *stream = pdf_memmem(cursor, remaining, "stream", 6u);
             size_t object = 0u;
+            if (stream &&
+                (!found || (size_t)(stream - cursor) <
+                               (size_t)(found - cursor))) {
+                const char *end = pdf_memmem(
+                    stream, remaining - (size_t)(stream - cursor),
+                    "endstream", 9u);
+                if (!end) break;
+                cursor = end + 9;
+                remaining = size - (size_t)(cursor - (const char *)data);
+                continue;
+            }
             if (!found) break;
             if (pdf_object_number_before(reader, found, &object) &&
                 count < QW_PDF_READER_MAX_PAGES) {
@@ -1051,8 +1063,17 @@ int qw_mupdf_pdf_reader_open(const uint8_t *data, size_t size,
     if (count < QW_PDF_READER_MAX_PAGES) {
         size_t slice_index;
         for (slice_index = 0u; slice_index < reader->slice_count; ++slice_index) {
-            const char *found = pdf_find_typed(reader->slices[slice_index].data,
-                                               reader->slices[slice_index].size, "Page");
+            const char *found;
+            {
+                const char *body = NULL;
+                size_t dict_size = 0u;
+                if (pdf_object_body(reader, reader->slices[slice_index].object,
+                                    &body, &dict_size) &&
+                    pdf_memmem(body, dict_size, "/ObjStm", 7u))
+                    continue;
+            }
+            found = pdf_find_typed(reader->slices[slice_index].data,
+                                   reader->slices[slice_index].size, "Page");
             if (!found) continue;
             if (count >= capacity) {
                 size_t grown = capacity ? capacity * 2u : 16u;
