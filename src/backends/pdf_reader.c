@@ -16,6 +16,7 @@
 #include "mupdf_backend.h"
 
 #include <quirewise/compression.h>
+#include <quirewise/image.h>
 
 #include <ctype.h>
 #include <stdarg.h>
@@ -964,7 +965,122 @@ static void pdf_paint_rect(uint8_t *pixels, size_t width, size_t height,
     }
 }
 
-static int pdf_paint_content(const uint8_t *stream, size_t size,
+
+typedef struct PdfImageRef {
+    char name[64];
+    size_t object;
+} PdfImageRef;
+
+static size_t pdf_collect_image_xobjects(const QwMuPdfReader *reader,
+                                         size_t page_object,
+                                         PdfImageRef *refs, size_t capacity)
+{
+    const char *body = NULL;
+    size_t dict_size = 0u;
+    char *copy;
+    char *cursor;
+    char *end;
+    size_t count = 0u;
+    if (!pdf_object_body(reader, page_object, &body, &dict_size)) return 0u;
+    copy = (char *)malloc(dict_size + 1u);
+    if (!copy) return 0u;
+    memcpy(copy, body, dict_size);
+    copy[dict_size] = '\0';
+    cursor = strstr(copy, "/XObject");
+    if (cursor) {
+        cursor = strchr(cursor, '<');
+        end = cursor ? strstr(cursor, ">>") : NULL;
+        while (cursor && end && cursor < end && count < capacity) {
+            char *name = strchr(cursor, '/');
+            if (!name || name >= end) break;
+            cursor = name + 1;
+            while (cursor < end && *cursor && *cursor != ' ' &&
+                   *cursor != '\t' && *cursor != '\r' && *cursor != '\n' &&
+                   *cursor != '/')
+                ++cursor;
+            {
+                size_t name_length = (size_t)(cursor - name - 1);
+                if (name_length > 0u && name_length < sizeof(refs[0].name)) {
+                    memcpy(refs[count].name, name + 1, name_length);
+                    refs[count].name[name_length] = '\0';
+                    refs[count].object = (size_t)strtoul(cursor, &cursor, 10);
+                    if (refs[count].object) ++count;
+                }
+            }
+            cursor = strstr(cursor, "/");
+        }
+    }
+    free(copy);
+    return count;
+}
+
+static void pdf_blit_image(const QwImage *image, uint8_t *pixels, size_t width,
+                           size_t height, const PdfMatrix *ctm)
+{
+    double x0 = ctm->e;
+    double y0 = ctm->f;
+    double x1 = ctm->e + ctm->a;
+    double y1 = ctm->f + ctm->d;
+    size_t left, right, top, bottom, row, column;
+    if (ctm->b != 0.0 || ctm->c != 0.0 || !image->pixels || !image->width ||
+        !image->height)
+        return;
+    if (x0 > x1) { double swap = x0; x0 = x1; x1 = swap; }
+    if (y0 > y1) { double swap = y0; y0 = y1; y1 = swap; }
+    left = x0 < 0.0 ? 0u : (size_t)x0;
+    right = x1 > (double)width ? width : (size_t)(x1 + 0.999);
+    bottom = y0 < 0.0 ? 0u : (size_t)y0;
+    top = y1 > (double)height ? height : (size_t)(y1 + 0.999);
+    if (left >= right || bottom >= top) return;
+    for (column = left; column < right; ++column) {
+        size_t source_x = (size_t)((column - left) * (size_t)image->width /
+                                   (right - left));
+        for (row = bottom; row < top; ++row) {
+            size_t inverted = height - 1u - row;
+            size_t source_y = (size_t)((row - bottom) * (size_t)image->height /
+                                       (top - bottom));
+            size_t destination = (inverted * width + column) * 3u;
+            const uint8_t *source;
+            if (inverted >= height) continue;
+            if (source_y >= image->height) source_y = image->height - 1u;
+            if (source_x >= image->width) source_x = image->width - 1u;
+            if (image->format == QW_IMAGE_PIXEL_RGB24) {
+                source = image->pixels + source_y * image->stride + source_x * 3u;
+                pixels[destination + 0u] = source[0];
+                pixels[destination + 1u] = source[1];
+                pixels[destination + 2u] = source[2];
+            } else if (image->format == QW_IMAGE_PIXEL_GRAY8) {
+                source = image->pixels + source_y * image->stride + source_x;
+                pixels[destination + 0u] = source[0];
+                pixels[destination + 1u] = source[0];
+                pixels[destination + 2u] = source[0];
+            }
+        }
+    }
+}
+
+static int pdf_draw_image_xobject(const QwMuPdfReader *reader, size_t object,
+                                  uint8_t *pixels, size_t width, size_t height,
+                                  const PdfMatrix *ctm)
+{
+    size_t stream_size = 0u;
+    uint8_t *stream = pdf_object_stream(reader, object, &stream_size);
+    QwImage image;
+    int ok = 0;
+    if (!stream) return 0;
+    memset(&image, 0, sizeof(image));
+    if (qw_image_decode(stream, stream_size, &image) == QW_IMAGE_OK) {
+        pdf_blit_image(&image, pixels, width, height, ctm);
+        qw_image_free(&image);
+        ok = 1;
+    }
+    free(stream);
+    return ok;
+}
+
+static int pdf_paint_content(const QwMuPdfReader *reader,
+                             const PdfImageRef *images, size_t image_count,
+                             const uint8_t *stream, size_t size,
                              uint8_t *pixels, size_t width, size_t height,
                              size_t *painted, int *skipped_text_or_image)
 {
@@ -975,6 +1091,8 @@ static int pdf_paint_content(const uint8_t *stream, size_t size,
     uint8_t fill[3] = {0u, 0u, 0u};
     double numbers[8];
     size_t number_count = 0u;
+    char last_name[64];
+    last_name[0] = '\0';
     pdf_matrix_reset(&ctm);
     while (position < size) {
         char ch = (char)stream[position];
@@ -1010,8 +1128,16 @@ static int pdf_paint_content(const uint8_t *stream, size_t size,
                 continue;
             }
             if (ch == '/') {
-                while (position < size && (unsigned char)stream[position] > 32u)
+                size_t name_start = ++position;
+                while (position < size && (unsigned char)stream[position] > 32u &&
+                       stream[position] != '/')
                     ++position;
+                {
+                    size_t name_length = position - name_start;
+                    if (name_length >= sizeof(last_name)) name_length = sizeof(last_name) - 1u;
+                    memcpy(last_name, stream + name_start, name_length);
+                    last_name[name_length] = '\0';
+                }
                 continue;
             }
             {
@@ -1086,10 +1212,23 @@ static int pdf_paint_content(const uint8_t *stream, size_t size,
                        strcmp(operator_name, "S") == 0 ||
                        strcmp(operator_name, "s") == 0) {
                 /* rectangles already painted at `re` time */
-            } else if (strcmp(operator_name, "BT") == 0 ||
-                       strcmp(operator_name, "Do") == 0 ||
-                       strcmp(operator_name, "Tj") == 0 ||
-                       strcmp(operator_name, "TJ") == 0) {
+            } else if (strcmp(operator_name, "Do") == 0 && last_name[0]) {
+                size_t image_index;
+                int drawn = 0;
+                for (image_index = 0u; image_index < image_count; ++image_index) {
+                    if (strcmp(images[image_index].name, last_name) == 0) {
+                        drawn = pdf_draw_image_xobject(reader,
+                                                       images[image_index].object,
+                                                       pixels, width, height,
+                                                       &ctm);
+                        break;
+                    }
+                }
+                if (drawn) ++*painted;
+                else *skipped_text_or_image = 1;
+            } else if (strcmp(operator_name, "Tj") == 0 ||
+                       strcmp(operator_name, "TJ") == 0 ||
+                       strcmp(operator_name, "BT") == 0) {
                 *skipped_text_or_image = 1;
             }
             number_count = 0u;
@@ -1175,6 +1314,9 @@ int qw_mupdf_pdf_reader_render_page(QwMuPdfReader *reader, size_t page_index,
         size_t contents = 0u;
         size_t painted = 0u;
         int skipped_text_or_image = 0;
+        PdfImageRef images[16];
+        size_t image_count = pdf_collect_image_xobjects(
+            reader, reader->page_objects[page_index], images, 16u);
         if (pdf_object_body(reader, reader->page_objects[page_index], &body,
                             &dict_size)) {
             char *dict = (char *)malloc(dict_size + 1u);
@@ -1186,7 +1328,8 @@ int qw_mupdf_pdf_reader_render_page(QwMuPdfReader *reader, size_t page_index,
                     uint8_t *stream = pdf_object_stream(reader, contents,
                                                         &stream_size);
                     if (stream) {
-                        (void)pdf_paint_content(stream, stream_size, pixels,
+                        (void)pdf_paint_content(reader, images, image_count,
+                                                stream, stream_size, pixels,
                                                 width, height, &painted,
                                                 &skipped_text_or_image);
                         free(stream);
@@ -1198,7 +1341,7 @@ int qw_mupdf_pdf_reader_render_page(QwMuPdfReader *reader, size_t page_index,
         if (report) {
             report->pages_written = 1u;
             snprintf(report->note, sizeof(report->note),
-                     "PDF rasterisation: %ux%u at %u dpi; %zu filled rectangle(s) "
+                     "PDF rasterisation: %ux%u at %u dpi; %zu painted object(s) "
                      "painted%s (QW_ROUTE_LOSS_RASTERIZATION|"
                      "QW_ROUTE_LOSS_SEMANTICS_UNVERIFIED)",
                      (unsigned int)width, (unsigned int)height, dpi, painted,

@@ -60,7 +60,7 @@ int main(void)
             return 4;
         }
     }
-    if (!strstr(report.note, "1 filled rectangle")) {
+    if (!strstr(report.note, "1 painted object")) {
         fprintf(stderr, "rectangle count missing: %s\n", report.note);
         free((void *)page.data);
         qw_mupdf_pdf_reader_close(reader);
