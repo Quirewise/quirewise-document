@@ -117,10 +117,12 @@ int main(void)
         static const uint8_t junk[] = {0x01u, 0x02u, 0x03u, 0x04u};
         CHECK(qw_mupdf_convert_memory(junk, sizeof(junk), ".bin", 0, &pdf,
                                       &pdf_size, NULL) == QW_STATUS_ERR_UNSUPPORTED);
+        pdf = NULL;
         CHECK(qw_mupdf_convert_memory((const uint8_t *)FODT, strlen(FODT), ".fodt",
-                                      1, &pdf, &pdf_size, NULL) ==
-              QW_STATUS_ERR_UNSUPPORTED);
-        CHECK(pdf == NULL);
+                                      1, &pdf, &pdf_size, NULL) == QW_STATUS_OK);
+        CHECK(is_pdf(pdf, pdf_size));
+        free(pdf);
+        pdf = NULL;
     }
 
     CHECK(qw_convert_to_pdf_memory(NULL, 0u, &options, &pdf, &pdf_size, NULL) ==

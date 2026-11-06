@@ -128,6 +128,190 @@ int qw_convert_to_pdf_memory(const void *data, size_t size,
 }
 
 /* Map the historical MuPDF "convert memory" entry onto the internal writers. */
+
+#include <quirewise/epub.h>
+
+#define QW_EPUB_HTML_LIMIT (8u * 1024u * 1024u)
+
+static int epub_html_append(char **buffer, size_t *size, size_t *capacity,
+                            const char *text, size_t length)
+{
+    char *grown;
+    size_t needed = *size + length;
+    if (needed < *size || needed > QW_EPUB_HTML_LIMIT) return 0;
+    if (needed + 1u > *capacity) {
+        size_t next = *capacity ? *capacity : 1024u;
+        while (next < needed + 1u) {
+            if (next > QW_EPUB_HTML_LIMIT / 2u) { next = QW_EPUB_HTML_LIMIT; break; }
+            next *= 2u;
+        }
+        if (next < needed + 1u) return 0;
+        grown = (char *)realloc(*buffer, next);
+        if (!grown) return 0;
+        *buffer = grown;
+        *capacity = next;
+    }
+    if (length) memcpy(*buffer + *size, text, length);
+    *size = needed;
+    (*buffer)[*size] = '\0';
+    return 1;
+}
+
+static int epub_html_escape(char **buffer, size_t *size, size_t *capacity,
+                            const char *text, size_t length)
+{
+    size_t i;
+    for (i = 0u; i < length; ++i) {
+        const char *replacement = NULL;
+        switch (text[i]) {
+        case '&': replacement = "&amp;"; break;
+        case '<': replacement = "&lt;"; break;
+        case '>': replacement = "&gt;"; break;
+        case '"': replacement = "&quot;"; break;
+        default: break;
+        }
+        if (replacement) {
+            if (!epub_html_append(buffer, size, capacity, replacement,
+                                  strlen(replacement))) return 0;
+        } else if (!epub_html_append(buffer, size, capacity, text + i, 1u)) {
+            return 0;
+        }
+    }
+    return 1;
+}
+
+static int epub_to_html_internal(const uint8_t *data, size_t size,
+                                 char **out_html, size_t *out_size,
+                                 QwConvertReport *report)
+{
+    QwEpubDocument *document = NULL;
+    QwEpubStatus status;
+    char *html = NULL;
+    size_t length = 0u;
+    size_t capacity = 0u;
+    size_t section_index;
+    size_t section_count;
+    int ok = 0;
+    status = qw_epub_parse(data, size, &document);
+    if (status != QW_EPUB_OK || !document) {
+        if (report) snprintf(report->note, sizeof(report->note),
+                             "EPUB parse failed with status %d", (int)status);
+        return status == QW_EPUB_ERR_RESOURCE_LIMIT
+                   ? QW_STATUS_ERR_RESOURCE_LIMIT
+                   : QW_STATUS_ERR_FORMAT;
+    }
+    section_count = qw_epub_section_count(document);
+    ok = epub_html_append(&html, &length, &capacity,
+                          "<html><body>", strlen("<html><body>"));
+    for (section_index = 0u; ok && section_index < section_count;
+         ++section_index) {
+        QwEpubSectionView section;
+        size_t paragraph_index;
+        memset(&section, 0, sizeof(section));
+        if (qw_epub_section_at(document, section_index, &section) !=
+            QW_EPUB_OK) {
+            ok = 0;
+            break;
+        }
+        if (section.title && section.title_size) {
+            ok = epub_html_append(&html, &length, &capacity, "<h1>", 4u) &&
+                 epub_html_escape(&html, &length, &capacity, section.title,
+                                  section.title_size) &&
+                 epub_html_append(&html, &length, &capacity, "</h1>", 5u);
+        }
+        for (paragraph_index = 0u;
+             ok && paragraph_index < section.paragraph_count;
+             ++paragraph_index) {
+            QwEpubParagraphView paragraph;
+            size_t run_index;
+            char tag[8];
+            memset(&paragraph, 0, sizeof(paragraph));
+            if (qw_epub_paragraph_at(document, section_index, paragraph_index,
+                                     &paragraph) != QW_EPUB_OK) {
+                ok = 0;
+                break;
+            }
+            if (paragraph.page_break_before) {
+                ok = epub_html_append(&html, &length, &capacity,
+                                      "<div style=\"page-break-before:always\"></div>",
+                                      strlen("<div style=\"page-break-before:always\"></div>"));
+            }
+            if (!ok) break;
+            if (paragraph.heading_level) {
+                snprintf(tag, sizeof(tag), "<h%u>",
+                         paragraph.heading_level > 6u ? 6u
+                                                       : paragraph.heading_level);
+                ok = epub_html_append(&html, &length, &capacity, tag,
+                                      strlen(tag));
+            } else {
+                ok = epub_html_append(&html, &length, &capacity, "<p>", 3u);
+            }
+            for (run_index = 0u; ok && run_index < paragraph.run_count;
+                 ++run_index) {
+                QwEpubRunView run;
+                memset(&run, 0, sizeof(run));
+                if (qw_epub_run_at(document, section_index, paragraph_index,
+                                   run_index, &run) != QW_EPUB_OK) {
+                    ok = 0;
+                    break;
+                }
+                if (run.link_target && run.link_target_size)
+                    ok = epub_html_append(&html, &length, &capacity,
+                                          "<a href=\"", strlen("<a href=\"")) &&
+                         epub_html_escape(&html, &length, &capacity,
+                                          run.link_target,
+                                          run.link_target_size) &&
+                         epub_html_append(&html, &length, &capacity, "\">", 2u);
+                if (ok && (run.style_flags & QW_EPUB_STYLE_BOLD))
+                    ok = epub_html_append(&html, &length, &capacity, "<b>", 3u);
+                if (ok && (run.style_flags & QW_EPUB_STYLE_ITALIC))
+                    ok = epub_html_append(&html, &length, &capacity, "<i>", 3u);
+                if (ok && (run.style_flags & QW_EPUB_STYLE_CODE))
+                    ok = epub_html_append(&html, &length, &capacity, "<code>", 6u);
+                if (ok && run.utf8_text && run.text_size)
+                    ok = epub_html_escape(&html, &length, &capacity,
+                                          (const char *)run.utf8_text,
+                                          run.text_size);
+                if (ok && (run.style_flags & QW_EPUB_STYLE_CODE))
+                    ok = epub_html_append(&html, &length, &capacity, "</code>", 7u);
+                if (ok && (run.style_flags & QW_EPUB_STYLE_ITALIC))
+                    ok = epub_html_append(&html, &length, &capacity, "</i>", 4u);
+                if (ok && (run.style_flags & QW_EPUB_STYLE_BOLD))
+                    ok = epub_html_append(&html, &length, &capacity, "</b>", 4u);
+                if (ok && run.link_target && run.link_target_size)
+                    ok = epub_html_append(&html, &length, &capacity, "</a>", 4u);
+            }
+            if (ok && paragraph.heading_level) {
+                snprintf(tag, sizeof(tag), "</h%u>",
+                         paragraph.heading_level > 6u ? 6u
+                                                       : paragraph.heading_level);
+                ok = epub_html_append(&html, &length, &capacity, tag,
+                                      strlen(tag));
+            } else if (ok) {
+                ok = epub_html_append(&html, &length, &capacity, "</p>", 4u);
+            }
+        }
+    }
+    if (ok)
+        ok = epub_html_append(&html, &length, &capacity, "</body></html>",
+                              strlen("</body></html>"));
+    qw_epub_document_free(document);
+    if (!ok) {
+        free(html);
+        if (report) snprintf(report->note, sizeof(report->note),
+                             "EPUB reflow hit the HTML size limit");
+        return QW_STATUS_ERR_RESOURCE_LIMIT;
+    }
+    *out_html = html;
+    *out_size = length;
+    if (report) {
+        snprintf(report->note, sizeof(report->note),
+                 "EPUB reflow: text/styles rendered; images and CSS approximated "
+                 "(QW_ROUTE_LOSS_TEXT_LAYOUT|QW_ROUTE_LOSS_FORMAT_DEPENDENT)");
+    }
+    return QW_STATUS_OK;
+}
+
 int qw_mupdf_convert_memory(const uint8_t *data, size_t size,
                             const char *input_extension, int reflow_epub,
                             uint8_t **out_pdf, size_t *out_size,
@@ -149,12 +333,21 @@ int qw_mupdf_convert_memory(const uint8_t *data, size_t size,
     *out_pdf = NULL;
     *out_size = 0u;
     if (!data || !size) return QW_STATUS_ERR_INVALID_ARGUMENT;
-    if (reflow_epub) {
-        if (report) {
+    if (reflow_epub && convert_region_equals(data, size, 0u, "PK\x03\x04")) {
+        char *epub_html = NULL;
+        size_t epub_html_size = 0u;
+        int epub_status = epub_to_html_internal(data, size, &epub_html,
+                                                &epub_html_size, report);
+        if (epub_status != QW_STATUS_OK) return epub_status;
+        epub_status = qw_mupdf_convert_html(epub_html, epub_html_size, out_pdf,
+                                            out_size, report);
+        free(epub_html);
+        if (epub_status == QW_STATUS_OK && report) {
             snprintf(report->note, sizeof(report->note),
-                     "EPUB reflow is not implemented by the internal renderer");
+                     "EPUB reflow: text/styles rendered; images and CSS approximated "
+                     "(QW_ROUTE_LOSS_TEXT_LAYOUT|QW_ROUTE_LOSS_FORMAT_DEPENDENT)");
         }
-        return QW_STATUS_ERR_UNSUPPORTED;
+        return epub_status;
     }
 
     if (convert_region_equals(data, size, 0u, "%PDF-")) is_pdf = 1;
