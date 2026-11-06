@@ -973,31 +973,6 @@ int qw_mupdf_convert_memory_with_outline(const uint8_t *data, size_t size,
                                    out_size, report);
 }
 
-int qw_mupdf_merge_pdf_documents(const uint8_t *const *pdfs, const size_t *sizes,
-                                 size_t count, uint8_t **out_pdf, size_t *out_size,
-                                 size_t *out_pages, QwConvertReport *report)
-{
-    size_t index;
-    (void)pdfs;
-    (void)sizes;
-    if (out_pdf) *out_pdf = NULL;
-    if (out_size) *out_size = 0u;
-    if (out_pages) *out_pages = 0u;
-    for (index = 0u; index < count; ++index) {
-        QwMuPdfReader *reader = NULL;
-        size_t pages = 0u;
-        if (!pdfs || !sizes) break;
-        if (qw_mupdf_pdf_reader_open(pdfs[index], sizes[index], &reader, &pages,
-                                     NULL) != QW_STATUS_OK) {
-            return QW_STATUS_ERR_FORMAT;
-        }
-        qw_mupdf_pdf_reader_close(reader);
-    }
-    if (report) snprintf(report->note, sizeof(report->note),
-                         "PDF merging is not implemented by the internal backend");
-    return QW_STATUS_ERR_UNSUPPORTED;
-}
-
 int qw_mupdf_decode_caj_jp2(const uint8_t *data, size_t size, QwPageImage *out_page,
                             QwConvertReport *report)
 {

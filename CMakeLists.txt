@@ -98,4 +98,12 @@ if(BUILD_TESTING)
         quirewise_document)
     add_test(NAME quirewise_document_format_registry
         COMMAND quirewise_document_format_registry_test)
+
+    add_executable(quirewise_document_pdf_merge_test tests/pdf_merge_test.c)
+    target_compile_features(quirewise_document_pdf_merge_test PRIVATE c_std_11)
+    target_include_directories(quirewise_document_pdf_merge_test PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}/src/backends")
+    target_link_libraries(quirewise_document_pdf_merge_test PRIVATE quirewise_document)
+    add_test(NAME quirewise_document_pdf_merge
+        COMMAND quirewise_document_pdf_merge_test)
 endif()
