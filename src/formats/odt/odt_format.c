@@ -1,9 +1,7 @@
 #include "format_registry.h"
 #include "odt_format.h"
 
-#if !defined(QUIREWISE_STANDALONE_ODT)
 #include "../../backends/mupdf_backend.h"
-#endif
 #include "../../core/xml_parser.h"
 #include "../archive/zip_native.h"
 
@@ -115,7 +113,10 @@ static int odt_fodt_probe(const void *data, size_t size)
                                    sizeof(text_mimetype) - 1u);
 }
 
-#if defined(QUIREWISE_WITH_MUPDF) || defined(QUIREWISE_STANDALONE_ODT)
+/* The native OpenDocument implementation no longer depends on an external
+ * XML/PDF engine: XML parsing uses the internal parser and PDF output uses the
+ * internal renderer in src/backends/layout_pdf.c. */
+#if 1
 
 enum {
     ODT_XML_LIMIT = 64 * 1024 * 1024,
@@ -856,15 +857,9 @@ static int odt_build_layout_html(const void *data, size_t size,
         content_size = size;
         flat_xml = 1;
     } else {
-#ifdef QUIREWISE_STANDALONE_ODT
         if (!qw_zip_reader_init_mem_with_profile(
                 &zip, data, size, 0,
                 QW_FORMAT_INPUT_RESOURCE_PROFILE_DOCUMENT_ARCHIVE)) {
-#else
-        if (!qw_zip_reader_init_mem_with_profile(
-                &zip, data, size, 0,
-                qw_format_resource_profile_get(QW_FORMAT_ODT))) {
-#endif
             return odt_set_error(report, QW_STATUS_ERR_FORMAT,
                                  "OpenDocument text package could not be opened as ZIP");
         }
@@ -987,7 +982,9 @@ int qw_odt_native_open_layout(const void *data, size_t size,
     return QW_STATUS_OK;
 }
 
-#if defined(QUIREWISE_WITH_MUPDF)
+/* The PDF path is served by the internal Quirewise HTML/PDF writer in
+ * src/backends/layout_pdf.c; no external MuPDF code is involved. */
+#if 1
 static int odt_convert_to_pdf(const void *data, size_t size,
                               const QwConvertOptions *options,
                               uint8_t **out_pdf, size_t *out_size,
@@ -995,12 +992,20 @@ static int odt_convert_to_pdf(const void *data, size_t size,
 {
     OdtHtml html = {0};
     size_t skipped_images = 0u;
+    QwInputFormat layout_format = QW_FORMAT_ODT;
     int rc;
     (void)options;
     if (!out_pdf || !out_size) return QW_STATUS_ERR_INVALID_ARGUMENT;
     *out_pdf = NULL;
     *out_size = 0u;
-    rc = odt_build_layout_html(data, size, QW_FORMAT_ODT, &html,
+    /* Flat OpenDocument XML is not a ZIP package; pick the matching probe so
+     * the same PDF entry point serves both ODT and FODT inputs. */
+    if (size >= 5u && memcmp(data, "<?xml", 5u) == 0) {
+        layout_format = QW_FORMAT_FODT;
+    } else if (odt_fodt_probe(data, size)) {
+        layout_format = QW_FORMAT_FODT;
+    }
+    rc = odt_build_layout_html(data, size, layout_format, &html,
                                &skipped_images, report);
     if (rc == QW_STATUS_OK) {
         rc = qw_mupdf_convert_html_with_page_size(

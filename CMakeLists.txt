@@ -19,7 +19,8 @@ add_library(quirewise_document ${QW_LIBRARY_TYPE} ${QW_SOURCES})
 add_library(Quirewise::Document ALIAS quirewise_document)
 set_target_properties(quirewise_document PROPERTIES EXPORT_NAME Document POSITION_INDEPENDENT_CODE ON)
 target_compile_features(quirewise_document PUBLIC c_std_11)
-target_compile_definitions(quirewise_document PRIVATE QUIREWISE_STANDALONE_DOCX_PARSER=1)
+target_compile_definitions(quirewise_document PRIVATE
+    QUIREWISE_STANDALONE_DOCX_PARSER=1)
 target_include_directories(quirewise_document PUBLIC
     "$<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>"
     "$<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>"
@@ -39,4 +40,23 @@ if(QUIREWISE_BUILD_SHARED AND WIN32)
     set_target_properties(
         quirewise_document
         PROPERTIES WINDOWS_EXPORT_ALL_SYMBOLS ON)
+endif()
+
+include(CTest)
+if(BUILD_TESTING)
+    add_executable(quirewise_document_html_pdf_test tests/html_pdf_writer_test.c)
+    target_compile_features(quirewise_document_html_pdf_test PRIVATE c_std_11)
+    target_include_directories(quirewise_document_html_pdf_test PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}/src/backends")
+    target_link_libraries(quirewise_document_html_pdf_test PRIVATE quirewise_document)
+    add_test(NAME quirewise_document_html_pdf
+        COMMAND quirewise_document_html_pdf_test)
+
+    add_executable(quirewise_document_odt_pdf_test tests/odt_pdf_end_to_end_test.c)
+    target_compile_features(quirewise_document_odt_pdf_test PRIVATE c_std_11)
+    target_include_directories(quirewise_document_odt_pdf_test PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}/src/core")
+    target_link_libraries(quirewise_document_odt_pdf_test PRIVATE quirewise_document)
+    add_test(NAME quirewise_document_odt_pdf
+        COMMAND quirewise_document_odt_pdf_test)
 endif()
