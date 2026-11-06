@@ -1078,6 +1078,97 @@ static int pdf_draw_image_xobject(const QwMuPdfReader *reader, size_t object,
     return ok;
 }
 
+
+typedef struct PdfPath {
+    double x[64];
+    double y[64];
+    size_t count;
+} PdfPath;
+
+static void pdf_path_reset(PdfPath *path)
+{
+    path->count = 0u;
+}
+
+static void pdf_path_add(PdfPath *path, const PdfMatrix *ctm, double x, double y)
+{
+    if (path->count >= 64u) return;
+    path->x[path->count] = ctm->a * x + ctm->c * y + ctm->e;
+    path->y[path->count] = ctm->b * x + ctm->d * y + ctm->f;
+    ++path->count;
+}
+
+static int pdf_point_in_polygon(const double *xs, const double *ys, size_t count,
+                                double px, double py)
+{
+    size_t i;
+    int inside = 0;
+    for (i = 0u; i < count; ++i) {
+        double xi = xs[i], yi = ys[i];
+        double xj = xs[(i + 1u) % count], yj = ys[(i + 1u) % count];
+        if ((yi > py) != (yj > py)) {
+            double x = (xj - xi) * (py - yi) / (yj - yi) + xi;
+            if (px < x) inside = !inside;
+        }
+    }
+    return inside;
+}
+
+static void pdf_fill_path(uint8_t *pixels, size_t width, size_t height,
+                          const PdfPath *path, const uint8_t rgb[3])
+{
+    size_t row, column;
+    if (path->count < 3u) return;
+    for (row = 0u; row < height; ++row) {
+        size_t inverted = height - 1u - row;
+        for (column = 0u; column < width; ++column) {
+            if (pdf_point_in_polygon(path->x, path->y, path->count,
+                                     (double)column + 0.5,
+                                     (double)(inverted) + 0.5)) {
+                size_t offset = (row * width + column) * 3u;
+                pixels[offset + 0u] = rgb[0];
+                pixels[offset + 1u] = rgb[1];
+                pixels[offset + 2u] = rgb[2];
+            }
+        }
+    }
+}
+
+static void pdf_stroke_path(uint8_t *pixels, size_t width, size_t height,
+                            const PdfPath *path, const uint8_t rgb[3])
+{
+    size_t segment;
+    if (path->count < 2u) return;
+    for (segment = 0u; segment + 1u < path->count; ++segment) {
+        double x0 = path->x[segment], y0 = path->y[segment];
+        double x1 = path->x[segment + 1u], y1 = path->y[segment + 1u];
+        double dx = x1 - x0, dy = y1 - y0;
+        int steps = (int)((dx < 0.0 ? -dx : dx) > (dy < 0.0 ? -dy : dy)
+                              ? (dx < 0.0 ? -dx : dx)
+                              : (dy < 0.0 ? -dy : dy));
+        int step;
+        if (steps <= 0) steps = 1;
+        for (step = 0; step <= steps; ++step) {
+            double t = (double)step / (double)steps;
+            double px = x0 + dx * t;
+            double py = y0 + dy * t;
+            if (px < 0.0 || py < 0.0 || px >= (double)width ||
+                py >= (double)height)
+                continue;
+            {
+                size_t column = (size_t)px;
+                size_t row = height - 1u - (size_t)py;
+                size_t offset;
+                if (column >= width || row >= height) continue;
+                offset = (row * width + column) * 3u;
+                pixels[offset + 0u] = rgb[0];
+                pixels[offset + 1u] = rgb[1];
+                pixels[offset + 2u] = rgb[2];
+            }
+        }
+    }
+}
+
 static int pdf_paint_content(const QwMuPdfReader *reader,
                              const PdfImageRef *images, size_t image_count,
                              const uint8_t *stream, size_t size,
@@ -1092,7 +1183,9 @@ static int pdf_paint_content(const QwMuPdfReader *reader,
     double numbers[8];
     size_t number_count = 0u;
     char last_name[64];
+    PdfPath path;
     last_name[0] = '\0';
+    pdf_path_reset(&path);
     pdf_matrix_reset(&ctm);
     while (position < size) {
         char ch = (char)stream[position];
@@ -1206,12 +1299,31 @@ static int pdf_paint_content(const QwMuPdfReader *reader,
                                numbers[number_count - 2u],
                                numbers[number_count - 1u], fill);
                 ++*painted;
+            } else if ((strcmp(operator_name, "m") == 0 ||
+                        strcmp(operator_name, "l") == 0) &&
+                       number_count >= 2u) {
+                pdf_path_add(&path, &ctm, numbers[number_count - 2u],
+                             numbers[number_count - 1u]);
+            } else if ((strcmp(operator_name, "c") == 0 && number_count >= 6u) ||
+                       (strcmp(operator_name, "v") == 0 && number_count >= 4u) ||
+                       (strcmp(operator_name, "y") == 0 && number_count >= 4u)) {
+                pdf_path_add(&path, &ctm, numbers[number_count - 2u],
+                             numbers[number_count - 1u]);
+            } else if (strcmp(operator_name, "h") == 0) {
+                /* closed by the polygon fill; nothing else to record */
             } else if (strcmp(operator_name, "f") == 0 ||
                        strcmp(operator_name, "F") == 0 ||
-                       strcmp(operator_name, "f*") == 0 ||
-                       strcmp(operator_name, "S") == 0 ||
+                       strcmp(operator_name, "f*") == 0) {
+                pdf_fill_path(pixels, width, height, &path, fill);
+                if (path.count >= 3u) ++*painted;
+                pdf_path_reset(&path);
+            } else if (strcmp(operator_name, "S") == 0 ||
                        strcmp(operator_name, "s") == 0) {
-                /* rectangles already painted at `re` time */
+                pdf_stroke_path(pixels, width, height, &path, fill);
+                if (path.count >= 2u) ++*painted;
+                pdf_path_reset(&path);
+            } else if (strcmp(operator_name, "n") == 0) {
+                pdf_path_reset(&path);
             } else if (strcmp(operator_name, "Do") == 0 && last_name[0]) {
                 size_t image_index;
                 int drawn = 0;
