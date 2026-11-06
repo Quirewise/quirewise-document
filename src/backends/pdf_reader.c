@@ -1769,10 +1769,30 @@ int qw_mupdf_convert_memory_with_outline(const uint8_t *data, size_t size,
 int qw_mupdf_decode_caj_jp2(const uint8_t *data, size_t size, QwPageImage *out_page,
                             QwConvertReport *report)
 {
-    (void)data;
-    (void)size;
-    if (out_page) memset(out_page, 0u, sizeof(*out_page));
+    QwImage image;
+    uint8_t *copy;
+    if (!data || !size || !out_page) return QW_STATUS_ERR_INVALID_ARGUMENT;
+    memset(out_page, 0u, sizeof(*out_page));
+    memset(&image, 0, sizeof(image));
+    if (qw_image_decode(data, size, &image) != QW_IMAGE_OK) {
+        if (report) snprintf(report->note, sizeof(report->note),
+                             "CAJ JP2 payload could not be decoded by the internal image decoder");
+        return QW_STATUS_ERR_FORMAT;
+    }
+    copy = (uint8_t *)malloc(image.size);
+    if (!copy) {
+        qw_image_free(&image);
+        return QW_STATUS_ERR_OUT_OF_MEMORY;
+    }
+    memcpy(copy, image.pixels, image.size);
+    out_page->data = copy;
+    out_page->size = image.size;
+    out_page->width = image.width;
+    out_page->height = image.height;
+    out_page->kind = image.format == QW_IMAGE_PIXEL_RGB24 ? QW_PAGE_IMAGE_RGB24
+                                                          : QW_PAGE_IMAGE_GRAY8;
+    qw_image_free(&image);
     if (report) snprintf(report->note, sizeof(report->note),
-                         "CAJ JP2 decoding belongs to the page package; the document backend only renders HTML");
-    return QW_STATUS_ERR_UNSUPPORTED;
+                         "CAJ JP2 payload decoded by the internal image decoder");
+    return QW_STATUS_OK;
 }
