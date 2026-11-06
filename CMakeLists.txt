@@ -88,6 +88,13 @@ if(BUILD_TESTING)
         "${CMAKE_CURRENT_SOURCE_DIR}/src/backends")
     target_link_libraries(quirewise_document_convert_dispatch_test PRIVATE
         quirewise_document)
+    add_executable(quirewise_document_format_fuzz_smoke
+        tests/document_format_fuzz_smoke.c)
+    target_compile_features(quirewise_document_format_fuzz_smoke PRIVATE c_std_11)
+    target_link_libraries(quirewise_document_format_fuzz_smoke PRIVATE quirewise_document)
+    add_test(NAME quirewise_document_format_fuzz
+        COMMAND quirewise_document_format_fuzz_smoke)
+
     add_test(NAME quirewise_document_convert_dispatch
         COMMAND quirewise_document_convert_dispatch_test)
 
