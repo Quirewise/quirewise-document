@@ -130,6 +130,8 @@ int qw_convert_to_pdf_memory(const void *data, size_t size,
 /* Map the historical MuPDF "convert memory" entry onto the internal writers. */
 
 #include <quirewise/epub.h>
+#include <quirewise/fb2.h>
+#include <quirewise/spreadsheet.h>
 
 #define QW_EPUB_HTML_LIMIT (8u * 1024u * 1024u)
 
@@ -312,6 +314,149 @@ static int epub_to_html_internal(const uint8_t *data, size_t size,
     return QW_STATUS_OK;
 }
 
+
+static int csv_html_append(char **buffer, size_t *size, size_t *capacity,
+                           const char *text, size_t length)
+{
+    char *grown;
+    size_t needed = *size + length;
+    if (needed < *size) return 0;
+    if (needed + 1u > *capacity) {
+        size_t next = *capacity ? *capacity : 1024u;
+        while (next < needed + 1u) next *= 2u;
+        grown = (char *)realloc(*buffer, next);
+        if (!grown) return 0;
+        *buffer = grown;
+        *capacity = next;
+    }
+    if (length) memcpy(*buffer + *size, text, length);
+    *size = needed;
+    (*buffer)[*size] = '\0';
+    return 1;
+}
+
+static int csv_html_escape(char **buffer, size_t *size, size_t *capacity,
+                           const uint8_t *text, size_t length)
+{
+    size_t i;
+    for (i = 0u; i < length; ++i) {
+        const char *replacement = NULL;
+        switch (text[i]) {
+        case '&': replacement = "&amp;"; break;
+        case '<': replacement = "&lt;"; break;
+        case '>': replacement = "&gt;"; break;
+        case '"': replacement = "&quot;"; break;
+        default: break;
+        }
+        if (replacement) {
+            if (!csv_html_append(buffer, size, capacity, replacement,
+                                 strlen(replacement))) return 0;
+        } else if (!csv_html_append(buffer, size, capacity, (const char *)text + i,
+                                    1u)) {
+            return 0;
+        }
+    }
+    return 1;
+}
+
+static int fb2_to_pdf_internal(const uint8_t *data, size_t size,
+                               uint8_t **out_pdf, size_t *out_size,
+                               QwConvertReport *report)
+{
+    QwFB2Document *document = NULL;
+    const uint8_t *html;
+    size_t html_size = 0u;
+    int status;
+    status = qw_fb2_parse(data, size, &document);
+    if (status != QW_FB2_OK || !document) {
+        if (report) snprintf(report->note, sizeof(report->note),
+                             "FB2 parse failed with status %d", status);
+        return status == QW_FB2_ERROR_RESOURCE_LIMIT
+                   ? QW_STATUS_ERR_RESOURCE_LIMIT
+                   : QW_STATUS_ERR_FORMAT;
+    }
+    html = qw_fb2_document_html(document, &html_size);
+    if (!html || !html_size) {
+        qw_fb2_document_free(document);
+        return QW_STATUS_ERR_FORMAT;
+    }
+    status = qw_mupdf_convert_html((const char *)html, html_size, out_pdf,
+                                   out_size, report);
+    qw_fb2_document_free(document);
+    if (status == QW_STATUS_OK && report) {
+        snprintf(report->note, sizeof(report->note),
+                 "FB2 layout: text rendered; images and CSS approximated "
+                 "(QW_ROUTE_LOSS_TEXT_LAYOUT|QW_ROUTE_LOSS_FORMAT_DEPENDENT)");
+    }
+    return status;
+}
+
+static int csv_to_pdf_internal(const uint8_t *data, size_t size,
+                               QwSpreadsheetFormat format,
+                               uint8_t **out_pdf, size_t *out_size,
+                               QwConvertReport *report)
+{
+    QwSpreadsheetDocument *document = NULL;
+    const QwSpreadsheetSheet *sheet;
+    size_t cell_count, index;
+    size_t current_row = (size_t)-1;
+    char *html = NULL;
+    size_t html_size = 0u, capacity = 0u;
+    int status;
+    status = qw_spreadsheet_parse(format, data, size, &document);
+    if (status != QW_SPREADSHEET_OK || !document) {
+        if (report) snprintf(report->note, sizeof(report->note),
+                             "Spreadsheet parse failed with status %d", status);
+        return status == QW_SPREADSHEET_ERR_RESOURCE_LIMIT
+                   ? QW_STATUS_ERR_RESOURCE_LIMIT
+                   : QW_STATUS_ERR_FORMAT;
+    }
+    if (qw_spreadsheet_sheet_count(document) == 0u) {
+        qw_spreadsheet_document_free(document);
+        return QW_STATUS_ERR_FORMAT;
+    }
+    sheet = qw_spreadsheet_sheet_at(document, 0u);
+    cell_count = sheet ? qw_spreadsheet_cell_count(sheet) : 0u;
+    if (!csv_html_append(&html, &html_size, &capacity, "<html><body><table>",
+                         strlen("<html><body><table>"))) {
+        qw_spreadsheet_document_free(document);
+        return QW_STATUS_ERR_RESOURCE_LIMIT;
+    }
+    for (index = 0u; index < cell_count; ++index) {
+        QwSpreadsheetCellView cell;
+        memset(&cell, 0, sizeof(cell));
+        if (qw_spreadsheet_cell_at(sheet, index, &cell) != QW_SPREADSHEET_OK)
+            continue;
+        if (cell.row != current_row) {
+            if (current_row != (size_t)-1)
+                if (!csv_html_append(&html, &html_size, &capacity, "</tr>", 5u))
+                    break;
+            if (!csv_html_append(&html, &html_size, &capacity, "<tr>", 4u))
+                break;
+            current_row = cell.row;
+        }
+        if (!csv_html_append(&html, &html_size, &capacity, "<td>", 4u) ||
+            !csv_html_escape(&html, &html_size, &capacity, cell.value,
+                             cell.value ? cell.value_size : 0u) ||
+            !csv_html_append(&html, &html_size, &capacity, "</td>", 5u))
+            break;
+    }
+    if (cell_count && current_row != (size_t)-1)
+        (void)csv_html_append(&html, &html_size, &capacity, "</tr>", 5u);
+    (void)csv_html_append(&html, &html_size, &capacity, "</table></body></html>",
+                          strlen("</table></body></html>"));
+    qw_spreadsheet_document_free(document);
+    if (!html) return QW_STATUS_ERR_OUT_OF_MEMORY;
+    status = qw_mupdf_convert_html(html, html_size, out_pdf, out_size, report);
+    free(html);
+    if (status == QW_STATUS_OK && report) {
+        snprintf(report->note, sizeof(report->note),
+                 "CSV layout: cells rendered as an HTML table; styles omitted "
+                 "(QW_ROUTE_LOSS_TEXT_LAYOUT|QW_ROUTE_LOSS_FORMAT_DEPENDENT)");
+    }
+    return status;
+}
+
 int qw_mupdf_convert_memory(const uint8_t *data, size_t size,
                             const char *input_extension, int reflow_epub,
                             uint8_t **out_pdf, size_t *out_size,
@@ -327,6 +472,8 @@ int qw_mupdf_convert_memory(const uint8_t *data, size_t size,
     int is_odt = 0;
     int is_html = 0;
     int is_pdf = 0;
+    int is_fb2 = 0;
+    int is_csv = 0;
     const char *extension = input_extension ? input_extension : "";
 
     if (!out_pdf || !out_size) return QW_STATUS_ERR_INVALID_ARGUMENT;
@@ -361,6 +508,11 @@ int qw_mupdf_convert_memory(const uint8_t *data, size_t size,
             is_docx = qw_docx_probe(data, size) != 0;
             is_odt = !is_docx;
         }
+    } else if (strstr(extension, "fb2") ||
+               contains_text((const char *)data, size, "<FictionBook")) {
+        is_fb2 = 1;
+    } else if (strstr(extension, "csv") || strstr(extension, "tsv")) {
+        is_csv = 1;
     } else if (convert_region_equals(data, size, 0u, "<?xml") ||
                contains_text((const char *)data, size, "office:document")) {
         is_odt = 1;
@@ -375,6 +527,16 @@ int qw_mupdf_convert_memory(const uint8_t *data, size_t size,
         return QW_STATUS_ERR_UNSUPPORTED;
     }
 
+    if (is_fb2) {
+        return fb2_to_pdf_internal(data, size, out_pdf, out_size, report);
+    }
+    if (is_csv) {
+        QwSpreadsheetFormat format =
+            strstr(extension, "tsv") ? QW_SPREADSHEET_FORMAT_TSV
+                                      : QW_SPREADSHEET_FORMAT_CSV;
+        return csv_to_pdf_internal(data, size, format, out_pdf, out_size,
+                                   report);
+    }
     if (is_pdf) {
         uint8_t *copy = (uint8_t *)malloc(size);
         if (!copy) return QW_STATUS_ERR_OUT_OF_MEMORY;
