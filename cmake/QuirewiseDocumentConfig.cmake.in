@@ -1,6 +1,7 @@
 @PACKAGE_INIT@
 include(CMakeFindDependencyMacro)
 find_dependency(QuirewiseArchive CONFIG)
+find_dependency(QuirewiseCompression CONFIG)
 find_dependency(QuirewiseData CONFIG)
 include("${CMAKE_CURRENT_LIST_DIR}/QuirewiseDocumentTargets.cmake")
 check_required_components(QuirewiseDocument)
