@@ -11,7 +11,7 @@
  * rebuilding such a graph needs a full xref-stream writer, which this backend
  * does not provide yet. No MuPDF code is involved. */
 
-#include "mupdf_backend.h"
+#include "document_backend.h"
 #include <quirewise/compression.h>
 
 #include <ctype.h>
@@ -470,7 +470,7 @@ static char *merge_rewrite_references(const char *text, size_t size, size_t offs
     return output;
 }
 
-int qw_mupdf_merge_pdf_documents(const uint8_t *const *pdfs, const size_t *sizes,
+int qw_pdf_merge_documents(const uint8_t *const *pdfs, const size_t *sizes,
                                  size_t count, uint8_t **out_pdf, size_t *out_size,
                                  size_t *out_pages, QwConvertReport *report)
 {

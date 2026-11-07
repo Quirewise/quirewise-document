@@ -1,4 +1,4 @@
-#include "mupdf_backend.h"
+#include "document_backend.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -61,18 +61,18 @@ int main(int argc, char **argv)
     uint8_t *pdf = NULL;
     size_t pdf_size = 0u;
     QwConvertReport report;
-    QwMuPdfReader *reader = NULL;
+    QwPdfReader *reader = NULL;
     size_t page_count = 0u;
     uint8_t *text = NULL;
     size_t text_size = 0u;
 
     memset(&report, 0, sizeof(report));
-    CHECK(qw_mupdf_convert_html(SAMPLE_HTML, strlen(SAMPLE_HTML), &pdf, &pdf_size,
+    CHECK(qw_doc_convert_html(SAMPLE_HTML, strlen(SAMPLE_HTML), &pdf, &pdf_size,
                                 &report) == QW_STATUS_OK);
-    CHECK(qw_mupdf_pdf_reader_open(pdf, pdf_size, &reader, &page_count, &report) ==
+    CHECK(qw_pdf_reader_open(pdf, pdf_size, &reader, &page_count, &report) ==
           QW_STATUS_OK);
     CHECK(reader != NULL && page_count == 1u);
-    CHECK(qw_mupdf_pdf_reader_extract_text(reader, &text, &text_size, &report) ==
+    CHECK(qw_pdf_reader_extract_text(reader, &text, &text_size, &report) ==
           QW_STATUS_OK);
     CHECK(text != NULL && text_size > 10u);
     CHECK(contains((const char *)text, text_size, "Quirewise"));
@@ -80,24 +80,24 @@ int main(int argc, char **argv)
     printf("extracted %zu bytes from one page: %.60s\n", text_size, (const char *)text);
     free(text);
     text = NULL;
-    qw_mupdf_pdf_reader_close(reader);
+    qw_pdf_reader_close(reader);
 
     /* Not a PDF. */
     {
-        QwMuPdfReader *bad = NULL;
+        QwPdfReader *bad = NULL;
         size_t pages = 0u;
         static const uint8_t garbage[] = "not a pdf at all";
-        CHECK(qw_mupdf_pdf_reader_open(garbage, sizeof(garbage) - 1u, &bad, &pages,
+        CHECK(qw_pdf_reader_open(garbage, sizeof(garbage) - 1u, &bad, &pages,
                                        NULL) == QW_STATUS_ERR_FORMAT);
         CHECK(bad == NULL);
     }
     /* Encrypted documents are rejected with a stable status. */
     {
-        QwMuPdfReader *encrypted = NULL;
+        QwPdfReader *encrypted = NULL;
         size_t pages = 0u;
         static const char encrypted_pdf[] =
             "%PDF-1.4\n1 0 obj\n<< /Type /Catalog /Encrypt 9 0 R >>\nendobj\n";
-        CHECK(qw_mupdf_pdf_reader_open((const uint8_t *)encrypted_pdf,
+        CHECK(qw_pdf_reader_open((const uint8_t *)encrypted_pdf,
                                        strlen(encrypted_pdf), &encrypted, &pages,
                                        NULL) == QW_STATUS_ERR_UNSUPPORTED);
     }
@@ -105,7 +105,7 @@ int main(int argc, char **argv)
     {
         QwPageImage image;
         memset(&image, 0, sizeof(image));
-        CHECK(qw_mupdf_render_pdf_page(pdf, pdf_size, 0u, 144u, &image, NULL) ==
+        CHECK(qw_pdf_render_page(pdf, pdf_size, 0u, 144u, &image, NULL) ==
               QW_STATUS_OK);
         CHECK(image.data != NULL && image.size > 0u);
         CHECK(image.kind == QW_PAGE_IMAGE_RGB24);
@@ -118,23 +118,23 @@ int main(int argc, char **argv)
         uint8_t *fixture = NULL;
         size_t fixture_size = 0u;
         if (read_file(argv[1], &fixture, &fixture_size)) {
-            QwMuPdfReader *external = NULL;
+            QwPdfReader *external = NULL;
             size_t external_pages = 0u;
-            int rc = qw_mupdf_pdf_reader_open(fixture, fixture_size, &external,
+            int rc = qw_pdf_reader_open(fixture, fixture_size, &external,
                                               &external_pages, &report);
             CHECK(rc == QW_STATUS_OK);
             CHECK(external_pages >= 1u);
             {
                 uint8_t *external_text = NULL;
                 size_t external_text_size = 0u;
-                CHECK(qw_mupdf_pdf_reader_extract_text(external, &external_text,
+                CHECK(qw_pdf_reader_extract_text(external, &external_text,
                                                        &external_text_size, NULL) ==
                       QW_STATUS_OK);
                 printf("external fixture: %zu page(s), %zu text bytes\n",
                        external_pages, external_text_size);
                 free(external_text);
             }
-            qw_mupdf_pdf_reader_close(external);
+            qw_pdf_reader_close(external);
             free(fixture);
         }
     }

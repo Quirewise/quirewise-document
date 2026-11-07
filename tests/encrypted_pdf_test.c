@@ -1,7 +1,7 @@
 #include <quirewise/convert.h>
 #include <quirewise/document.h>
 
-#include "../src/backends/mupdf_backend.h"
+#include "../src/backends/document_backend.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -37,7 +37,7 @@ int main(void)
 {
     uint8_t *data = NULL;
     size_t size = 0u;
-    QwMuPdfReader *reader = NULL;
+    QwPdfReader *reader = NULL;
     size_t pages = 0u;
     uint8_t *text = NULL;
     size_t text_size = 0u;
@@ -50,17 +50,17 @@ int main(void)
         return 1;
     }
     memset(&report, 0, sizeof(report));
-    rc = qw_mupdf_pdf_reader_open(data, size, &reader, &pages, &report);
+    rc = qw_pdf_reader_open(data, size, &reader, &pages, &report);
     if (rc != 0 || !reader || pages != 1u) {
         fprintf(stderr, "encrypted PDF open failed: rc=%d pages=%zu note=%s\n",
                 rc, pages, report.note);
         free(data);
         return 2;
     }
-    rc = qw_mupdf_pdf_reader_extract_text(reader, &text, &text_size, &report);
+    rc = qw_pdf_reader_extract_text(reader, &text, &text_size, &report);
     if (rc != 0 || !text) {
         fprintf(stderr, "encrypted text extraction failed: rc=%d\n", rc);
-        qw_mupdf_pdf_reader_close(reader);
+        qw_pdf_reader_close(reader);
         free(data);
         return 3;
     }
@@ -77,17 +77,17 @@ int main(void)
             fprintf(stderr, "unexpected decrypted text: %.*s\n", (int)text_size,
                     text);
             free(text);
-            qw_mupdf_pdf_reader_close(reader);
+            qw_pdf_reader_close(reader);
             free(data);
             return 4;
         }
     }
     free(text);
-    qw_mupdf_pdf_reader_close(reader);
+    qw_pdf_reader_close(reader);
     /* Corrupt /U so the empty user password no longer verifies. */
     {
         uint8_t *bad = (uint8_t *)malloc(size);
-        QwMuPdfReader *bad_reader = NULL;
+        QwPdfReader *bad_reader = NULL;
         size_t bad_pages = 0u;
         if (!bad) { free(data); return 5; }
         memcpy(bad, data, size);
@@ -96,11 +96,11 @@ int main(void)
             if (found && (size_t)(found - bad) + 10u < size)
                 found[6] = (found[6] == '0') ? '1' : '0';
         }
-        rc = qw_mupdf_pdf_reader_open(bad, size, &bad_reader, &bad_pages,
+        rc = qw_pdf_reader_open(bad, size, &bad_reader, &bad_pages,
                                       &report);
         if (rc == 0 || bad_reader) {
             fprintf(stderr, "corrupted key was accepted\n");
-            qw_mupdf_pdf_reader_close(bad_reader);
+            qw_pdf_reader_close(bad_reader);
             free(bad);
             free(data);
             return 6;

@@ -1,7 +1,7 @@
 #include <quirewise/convert.h>
 #include <quirewise/document.h>
 
-#include "../src/backends/mupdf_backend.h"
+#include "../src/backends/document_backend.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -45,7 +45,7 @@ int main(void)
         return 1;
     }
     memset(&report, 0, sizeof(report));
-    rc = qw_mupdf_decode_caj_jp2(data, size, &page, &report);
+    rc = qw_doc_decode_caj_jp2(data, size, &page, &report);
     free(data);
     if (rc != 0) {
         fprintf(stderr, "CAJ JP2 decode failed: rc=%d note=%s\n", rc,

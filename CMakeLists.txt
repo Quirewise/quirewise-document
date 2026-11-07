@@ -209,7 +209,9 @@ if(BUILD_TESTING)
     add_executable(quirewise_document_format_fuzz_smoke
         tests/document_format_fuzz_smoke.c)
     target_compile_features(quirewise_document_format_fuzz_smoke PRIVATE c_std_11)
-    target_link_libraries(quirewise_document_format_fuzz_smoke PRIVATE quirewise_document)
+    target_link_libraries(quirewise_document_format_fuzz_smoke PRIVATE
+        quirewise_document
+        Quirewise::Data)
     add_test(NAME quirewise_document_format_fuzz
         COMMAND quirewise_document_format_fuzz_smoke)
 

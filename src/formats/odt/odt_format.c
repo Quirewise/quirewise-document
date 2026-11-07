@@ -1,7 +1,7 @@
 #include "format_registry.h"
 #include "odt_format.h"
 
-#include "../../backends/mupdf_backend.h"
+#include "../../backends/document_backend.h"
 #include "../../core/xml_parser.h"
 #include "../archive/zip_native.h"
 
@@ -1036,7 +1036,7 @@ static int odt_convert_to_pdf(const void *data, size_t size,
     rc = odt_build_layout_html(data, size, layout_format, &html,
                                &skipped_images, report);
     if (rc == QW_STATUS_OK) {
-        rc = qw_mupdf_convert_html_with_page_size(
+        rc = qw_doc_convert_html_with_page_size(
             html.data, html.size, 595.0f, 842.0f,
             out_pdf, out_size, report);
     }

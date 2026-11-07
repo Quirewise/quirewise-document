@@ -1,7 +1,7 @@
 #include <quirewise/convert.h>
 #include <quirewise/document.h>
 
-#include "../src/backends/mupdf_backend.h"
+#include "../src/backends/document_backend.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -41,7 +41,7 @@ int main(void)
     size_t pdf_size = 0u;
     size_t capacity;
     int written;
-    QwMuPdfReader *reader = NULL;
+    QwPdfReader *reader = NULL;
     size_t pages = 0u;
     QwPageImage page;
     QwConvertReport report;
@@ -80,7 +80,7 @@ int main(void)
     pdf_size += (size_t)written;
     free(jpeg);
     memset(&report, 0, sizeof(report));
-    rc = qw_mupdf_pdf_reader_open((const uint8_t *)pdf, pdf_size, &reader,
+    rc = qw_pdf_reader_open((const uint8_t *)pdf, pdf_size, &reader,
                                   &pages, &report);
     if (rc != 0 || !reader || pages != 1u) {
         fprintf(stderr, "image PDF open failed: rc=%d pages=%zu note=%s\n", rc,
@@ -89,11 +89,11 @@ int main(void)
         return 4;
     }
     memset(&page, 0, sizeof(page));
-    rc = qw_mupdf_pdf_reader_render_page(reader, 0u, 72u, &page, &report);
+    rc = qw_pdf_reader_render_page(reader, 0u, 72u, &page, &report);
     if (rc != 0 || !page.data || page.width != 64u || page.height != 64u) {
         fprintf(stderr, "image page render failed: rc=%d %ux%u note=%s\n", rc,
                 page.width, page.height, report.note);
-        qw_mupdf_pdf_reader_close(reader);
+        qw_pdf_reader_close(reader);
         free(pdf);
         return 5;
     }
@@ -105,14 +105,14 @@ int main(void)
     if (!non_white) {
         fprintf(stderr, "image XObject was not painted: %s\n", report.note);
         free((void *)page.data);
-        qw_mupdf_pdf_reader_close(reader);
+        qw_pdf_reader_close(reader);
         free(pdf);
         return 6;
     }
     printf("PDF image XObject painted: %zu non-white pixels, note=%s\n",
            non_white, report.note);
     free((void *)page.data);
-    qw_mupdf_pdf_reader_close(reader);
+    qw_pdf_reader_close(reader);
     free(pdf);
     return 0;
 }

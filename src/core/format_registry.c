@@ -17,7 +17,7 @@
 
 #include "format_registry.h"
 
-#include "../backends/mupdf_backend.h"
+#include "../backends/document_backend.h"
 
 #include <stdint.h>
 #include <stdio.h>
@@ -324,7 +324,7 @@ int qw_native_text_pdf_from_utf8(const uint8_t *text, size_t text_size,
     }
     memcpy(html + position, "</body></html>", 14u);
     position += 14u;
-    rc = qw_mupdf_convert_html(html, position, out_pdf, out_size, NULL);
+    rc = qw_doc_convert_html(html, position, out_pdf, out_size, NULL);
     free(html);
     return rc;
 }

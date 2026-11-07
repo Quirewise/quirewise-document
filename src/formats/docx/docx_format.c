@@ -2,7 +2,7 @@
 #include "docx_format.h"
 
 #ifndef QUIREWISE_STANDALONE_DOCX_PARSER
-#include "../../backends/mupdf_backend.h"
+#include "../../backends/document_backend.h"
 #include "../../backends/svg_backend.h"
 #endif
 #include "../archive/zip_native.h"
@@ -2562,7 +2562,7 @@ static int docx_convert_to_pdf(const void *data,
                                &mixed_section_layout, &omitted_images,
                                &omitted_list_items, report);
     if (rc != QW_STATUS_OK) return rc;
-    rc = qw_mupdf_convert_html_with_page_size(
+    rc = qw_doc_convert_html_with_page_size(
         html.data, html.size,
         (float)page_layout.width_twips / 20.0f,
         (float)page_layout.height_twips / 20.0f,

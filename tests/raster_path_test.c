@@ -1,7 +1,7 @@
 #include <quirewise/convert.h>
 #include <quirewise/document.h>
 
-#include "../src/backends/mupdf_backend.h"
+#include "../src/backends/document_backend.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -20,13 +20,13 @@ static const char path_pdf[] =
 
 int main(void)
 {
-    QwMuPdfReader *reader = NULL;
+    QwPdfReader *reader = NULL;
     size_t pages = 0u;
     QwPageImage page;
     QwConvertReport report;
     int rc;
     memset(&report, 0, sizeof(report));
-    rc = qw_mupdf_pdf_reader_open((const uint8_t *)path_pdf,
+    rc = qw_pdf_reader_open((const uint8_t *)path_pdf,
                                   sizeof(path_pdf) - 1u, &reader, &pages,
                                   &report);
     if (rc != 0 || !reader || pages != 1u) {
@@ -35,11 +35,11 @@ int main(void)
         return 1;
     }
     memset(&page, 0, sizeof(page));
-    rc = qw_mupdf_pdf_reader_render_page(reader, 0u, 72u, &page, &report);
+    rc = qw_pdf_reader_render_page(reader, 0u, 72u, &page, &report);
     if (rc != 0 || !page.data || page.width != 64u || page.height != 64u) {
         fprintf(stderr, "path render failed: rc=%d %ux%u note=%s\n", rc,
                 page.width, page.height, report.note);
-        qw_mupdf_pdf_reader_close(reader);
+        qw_pdf_reader_close(reader);
         return 2;
     }
     {
@@ -49,25 +49,25 @@ int main(void)
             fprintf(stderr, "triangle interior is not green: %u,%u,%u\n",
                     inside[0], inside[1], inside[2]);
             free((void *)page.data);
-            qw_mupdf_pdf_reader_close(reader);
+            qw_pdf_reader_close(reader);
             return 3;
         }
         if (!(outside[0] == 255u && outside[1] == 255u && outside[2] == 255u)) {
             fprintf(stderr, "outside pixel is not white: %u,%u,%u\n", outside[0],
                     outside[1], outside[2]);
             free((void *)page.data);
-            qw_mupdf_pdf_reader_close(reader);
+            qw_pdf_reader_close(reader);
             return 4;
         }
     }
     if (!strstr(report.note, "1 painted object")) {
         fprintf(stderr, "painted count missing: %s\n", report.note);
         free((void *)page.data);
-        qw_mupdf_pdf_reader_close(reader);
+        qw_pdf_reader_close(reader);
         return 5;
     }
     free((void *)page.data);
-    qw_mupdf_pdf_reader_close(reader);
+    qw_pdf_reader_close(reader);
     puts("PDF path painting: green triangle interior, white outside");
     return 0;
 }

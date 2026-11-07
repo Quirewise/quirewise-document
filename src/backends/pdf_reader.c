@@ -1,19 +1,23 @@
-/* Internal PDF reading support for the former MuPDF backend interface.
+/* Internal PDF reading, rasterisation, merging and CAJ JP2 support.
  *
  * Implemented behaviour:
- *  - `qw_mupdf_pdf_reader_open` walks a classic PDF object table, counts pages
- *    and rejects encrypted or object-stream-only documents with a stable
- *    status;
- *  - `qw_mupdf_pdf_reader_extract_text` decodes page content streams
- *    (FlateDecode or raw), interprets the text operators (Tj, TJ, ', ") and
- *    returns UTF-8 text; Type0 fonts are decoded as UCS-2 big endian, simple
- *    fonts as single-byte WinAnsi/ASCII.
+ *  - `qw_pdf_reader_open` walks classic object tables and `/Type /ObjStm`
+ *    object streams, counts pages and decrypts RC4-protected documents;
+ *  - `qw_pdf_reader_extract_text` decodes page content streams (FlateDecode or
+ *    raw), interprets the text operators (Tj, TJ, ', ") and returns UTF-8
+ *    text; Type0 fonts are decoded as UCS-2 big endian, simple fonts as
+ *    single-byte WinAnsi/ASCII;
+ *  - `qw_pdf_reader_render_page` / `qw_pdf_render_page` rasterise pages with
+ *    RGB24 output and report unimplemented drawing operations through the
+ *    route-loss note;
+ *  - `qw_pdf_merge_documents` merges classic-xref inputs;
+ *  - `qw_doc_decode_caj_jp2` decodes a CAJ JP2 payload through the internal
+ *    image decoder.
  *
- * Explicitly unimplemented (stable `QW_STATUS_ERR_UNSUPPORTED`): rasterisation,
- * PDF merging, conversion from arbitrary input formats and CAJ JP2 decoding.
- * There is no MuPDF code, header or library involved. */
+ * Unsupported inputs and security handlers return a stable
+ * `QW_STATUS_ERR_UNSUPPORTED`. No MuPDF code, header or library is involved. */
 
-#include "mupdf_backend.h"
+#include "document_backend.h"
 
 #include <quirewise/compression.h>
 #include <quirewise/image.h>
@@ -41,7 +45,7 @@ typedef struct QwPdfObjectSlice {
     size_t size;
 } QwPdfObjectSlice;
 
-struct QwMuPdfReader {
+struct QwPdfReader {
     const uint8_t *data;
     size_t size;
     int encrypted;
@@ -58,7 +62,7 @@ struct QwMuPdfReader {
     int text_ready;
 };
 
-static void pdf_reader_free(QwMuPdfReader *reader)
+static void pdf_reader_free(QwPdfReader *reader)
 {
     size_t index;
     if (!reader) return;
@@ -136,7 +140,7 @@ static const char *pdf_memmem(const char *haystack, size_t haystack_size,
 
 /* Find "<number> 0 obj" with digit-boundary checks and return the offset of the
  * dictionary body. */
-static const char *pdf_find_object(const QwMuPdfReader *reader, size_t object)
+static const char *pdf_find_object(const QwPdfReader *reader, size_t object)
 {
     char pattern[32];
     int length = snprintf(pattern, sizeof(pattern), "%zu 0 obj", object);
@@ -157,7 +161,7 @@ static const char *pdf_find_object(const QwMuPdfReader *reader, size_t object)
 }
 
 /* Walk backwards from a "/Type /Page" match to the owning object number. */
-static int pdf_object_number_before(const QwMuPdfReader *reader, const char *position,
+static int pdf_object_number_before(const QwPdfReader *reader, const char *position,
                                     size_t *out_object)
 {
     const char *start = (const char *)reader->data;
@@ -242,7 +246,7 @@ static const char *pdf_find_typed(const char *data, size_t size, const char *nam
 }
 
 /* Raw object body: dictionary bytes between "N 0 obj" and "endobj". */
-static int pdf_raw_object_body(const QwMuPdfReader *reader, size_t object,
+static int pdf_raw_object_body(const QwPdfReader *reader, size_t object,
                                const char **out_body, size_t *out_size)
 {
     const char *body = pdf_find_object(reader, object);
@@ -258,7 +262,7 @@ static int pdf_raw_object_body(const QwMuPdfReader *reader, size_t object,
 }
 
 /* Object body from the main buffer or from a decompressed object stream. */
-static int pdf_object_body(const QwMuPdfReader *reader, size_t object,
+static int pdf_object_body(const QwPdfReader *reader, size_t object,
                            const char **out_body, size_t *out_size)
 {
     size_t index;
@@ -273,7 +277,7 @@ static int pdf_object_body(const QwMuPdfReader *reader, size_t object,
 }
 
 /* Register every object stored inside a decompressed /Type /ObjStm stream. */
-static int pdf_register_object_stream(QwMuPdfReader *reader, size_t owner)
+static int pdf_register_object_stream(QwPdfReader *reader, size_t owner)
 {
     const char *body;
     size_t body_size;
@@ -483,7 +487,7 @@ static long pdf_parse_int_field(const char *dict, size_t size, const char *tag,
     return value;
 }
 
-static int pdf_setup_encryption(QwMuPdfReader *reader)
+static int pdf_setup_encryption(QwPdfReader *reader)
 {
     const char *found;
     size_t encrypt_object = 0u;
@@ -573,7 +577,7 @@ static int pdf_setup_encryption(QwMuPdfReader *reader)
     return 0;
 }
 
-static void pdf_decrypt_object_data(const QwMuPdfReader *reader, size_t object,
+static void pdf_decrypt_object_data(const QwPdfReader *reader, size_t object,
                                     uint8_t *data, size_t size)
 {
     uint8_t extra[5];
@@ -599,7 +603,7 @@ static void pdf_decrypt_object_data(const QwMuPdfReader *reader, size_t object,
     pdf_rc4(digest, digest_size, data, size);
 }
 
-static uint8_t *pdf_object_stream(const QwMuPdfReader *reader, size_t object,
+static uint8_t *pdf_object_stream(const QwPdfReader *reader, size_t object,
                                   size_t *out_size)
 {
     const char *body;
@@ -701,7 +705,7 @@ static uint8_t *pdf_object_stream(const QwMuPdfReader *reader, size_t object,
     return NULL;
 }
 
-static int pdf_object_is_type0(const QwMuPdfReader *reader, size_t object)
+static int pdf_object_is_type0(const QwPdfReader *reader, size_t object)
 {
     const char *body;
     size_t body_size;
@@ -724,7 +728,7 @@ typedef struct QwPdfFontMap {
     size_t count;
 } QwPdfFontMap;
 
-static void pdf_collect_fonts(const QwMuPdfReader *reader, const char *dict,
+static void pdf_collect_fonts(const QwPdfReader *reader, const char *dict,
                               size_t dict_size, QwPdfFontMap *fonts)
 {
     const char *font = pdf_memmem(dict, dict_size, "/Font", 5u);
@@ -872,7 +876,7 @@ static int pdf_emit_string(QwPdfBuffer *text, const QwPdfBuffer *raw, int type0)
     return 1;
 }
 
-static int pdf_extract_content_text(const QwMuPdfReader *reader, const char *content,
+static int pdf_extract_content_text(const QwPdfReader *reader, const char *content,
                                     size_t content_size, const QwPdfFontMap *fonts,
                                     QwPdfBuffer *text)
 {
@@ -953,7 +957,7 @@ static int pdf_extract_content_text(const QwMuPdfReader *reader, const char *con
     return 1;
 }
 
-static int pdf_extract_page_text(const QwMuPdfReader *reader, size_t page_object,
+static int pdf_extract_page_text(const QwPdfReader *reader, size_t page_object,
                                  QwPdfBuffer *text)
 {
     const char *body;
@@ -985,12 +989,12 @@ static int pdf_extract_page_text(const QwMuPdfReader *reader, size_t page_object
     return ok;
 }
 
-int qw_mupdf_pdf_reader_open(const uint8_t *data, size_t size,
-                             QwMuPdfReader **out_reader,
+int qw_pdf_reader_open(const uint8_t *data, size_t size,
+                             QwPdfReader **out_reader,
                              size_t *out_page_count,
                              QwConvertReport *report)
 {
-    QwMuPdfReader *reader;
+    QwPdfReader *reader;
     size_t capacity = 0u;
     size_t count = 0u;
     if (!data || !size || !out_reader || !out_page_count) {
@@ -999,7 +1003,7 @@ int qw_mupdf_pdf_reader_open(const uint8_t *data, size_t size,
     *out_reader = NULL;
     *out_page_count = 0u;
     if (size < 8u || memcmp(data, "%PDF-", 5u) != 0) return QW_STATUS_ERR_FORMAT;
-    reader = (QwMuPdfReader *)calloc(1u, sizeof(*reader));
+    reader = (QwPdfReader *)calloc(1u, sizeof(*reader));
     if (!reader) return QW_STATUS_ERR_OUT_OF_MEMORY;
     reader->data = data;
     reader->size = size;
@@ -1114,7 +1118,7 @@ int qw_mupdf_pdf_reader_open(const uint8_t *data, size_t size,
     return QW_STATUS_OK;
 }
 
-int qw_mupdf_pdf_reader_extract_text(QwMuPdfReader *reader, uint8_t **out_text,
+int qw_pdf_reader_extract_text(QwPdfReader *reader, uint8_t **out_text,
                                      size_t *out_size, QwConvertReport *report)
 {
     QwPdfBuffer text;
@@ -1157,7 +1161,7 @@ int qw_mupdf_pdf_reader_extract_text(QwMuPdfReader *reader, uint8_t **out_text,
     return QW_STATUS_OK;
 }
 
-int qw_mupdf_pdf_reader_extract_text_to_stream(QwMuPdfReader *reader, FILE *stream,
+int qw_pdf_reader_extract_text_to_stream(QwPdfReader *reader, FILE *stream,
                                                size_t max_output_bytes,
                                                size_t *out_size,
                                                QwConvertReport *report)
@@ -1166,7 +1170,7 @@ int qw_mupdf_pdf_reader_extract_text_to_stream(QwMuPdfReader *reader, FILE *stre
     size_t text_size = 0u;
     int rc;
     if (!stream) return QW_STATUS_ERR_INVALID_ARGUMENT;
-    rc = qw_mupdf_pdf_reader_extract_text(reader, &text, &text_size, report);
+    rc = qw_pdf_reader_extract_text(reader, &text, &text_size, report);
     if (rc != QW_STATUS_OK) return rc;
     if (max_output_bytes && text_size > max_output_bytes) {
         free(text);
@@ -1241,7 +1245,7 @@ typedef struct PdfImageRef {
     size_t object;
 } PdfImageRef;
 
-static size_t pdf_collect_image_xobjects(const QwMuPdfReader *reader,
+static size_t pdf_collect_image_xobjects(const QwPdfReader *reader,
                                          size_t page_object,
                                          PdfImageRef *refs, size_t capacity)
 {
@@ -1329,7 +1333,7 @@ static void pdf_blit_image(const QwImage *image, uint8_t *pixels, size_t width,
     }
 }
 
-static int pdf_draw_image_xobject(const QwMuPdfReader *reader, size_t object,
+static int pdf_draw_image_xobject(const QwPdfReader *reader, size_t object,
                                   uint8_t *pixels, size_t width, size_t height,
                                   const PdfMatrix *ctm)
 {
@@ -1439,7 +1443,7 @@ static void pdf_stroke_path(uint8_t *pixels, size_t width, size_t height,
     }
 }
 
-static int pdf_paint_content(const QwMuPdfReader *reader,
+static int pdf_paint_content(const QwPdfReader *reader,
                              const PdfImageRef *images, size_t image_count,
                              const uint8_t *stream, size_t size,
                              uint8_t *pixels, size_t width, size_t height,
@@ -1621,7 +1625,7 @@ static int pdf_paint_content(const QwMuPdfReader *reader,
     return 1;
 }
 
-static int pdf_page_media_box(const QwMuPdfReader *reader, size_t page_object,
+static int pdf_page_media_box(const QwPdfReader *reader, size_t page_object,
                               double box[4])
 {
     const char *body = NULL;
@@ -1652,7 +1656,7 @@ static int pdf_page_media_box(const QwMuPdfReader *reader, size_t page_object,
     return 1;
 }
 
-int qw_mupdf_pdf_reader_render_page(QwMuPdfReader *reader, size_t page_index,
+int qw_pdf_reader_render_page(QwPdfReader *reader, size_t page_index,
                                     unsigned int dpi, QwPageImage *out_page,
                                     QwConvertReport *report)
 {
@@ -1733,40 +1737,40 @@ int qw_mupdf_pdf_reader_render_page(QwMuPdfReader *reader, size_t page_index,
     return QW_STATUS_OK;
 }
 
-void qw_mupdf_pdf_reader_close(QwMuPdfReader *reader)
+void qw_pdf_reader_close(QwPdfReader *reader)
 {
     pdf_reader_free(reader);
 }
 
-int qw_mupdf_render_pdf_page(const uint8_t *data, size_t size, size_t page_index,
+int qw_pdf_render_page(const uint8_t *data, size_t size, size_t page_index,
                              unsigned int dpi, QwPageImage *out_page,
                              QwConvertReport *report)
 {
-    QwMuPdfReader *reader = NULL;
+    QwPdfReader *reader = NULL;
     size_t page_count = 0u;
     int rc;
     if (out_page) memset(out_page, 0u, sizeof(*out_page));
-    rc = qw_mupdf_pdf_reader_open(data, size, &reader, &page_count, NULL);
+    rc = qw_pdf_reader_open(data, size, &reader, &page_count, NULL);
     if (rc != QW_STATUS_OK) return rc;
-    rc = qw_mupdf_pdf_reader_render_page(reader, page_index, dpi, out_page, report);
-    qw_mupdf_pdf_reader_close(reader);
+    rc = qw_pdf_reader_render_page(reader, page_index, dpi, out_page, report);
+    qw_pdf_reader_close(reader);
     return rc;
 }
 
-int qw_mupdf_convert_memory_with_outline(const uint8_t *data, size_t size,
+int qw_doc_convert_memory_with_outline(const uint8_t *data, size_t size,
                                          const char *input_extension,
-                                         const QwMuPdfOutlineItem *outline,
+                                         const QwPdfOutlineItem *outline,
                                          size_t outline_count,
                                          uint8_t **out_pdf, size_t *out_size,
                                          QwConvertReport *report)
 {
     (void)outline;
     (void)outline_count;
-    return qw_mupdf_convert_memory(data, size, input_extension, 0, out_pdf,
+    return qw_doc_convert_memory(data, size, input_extension, 0, out_pdf,
                                    out_size, report);
 }
 
-int qw_mupdf_decode_caj_jp2(const uint8_t *data, size_t size, QwPageImage *out_page,
+int qw_doc_decode_caj_jp2(const uint8_t *data, size_t size, QwPageImage *out_page,
                             QwConvertReport *report)
 {
     QwImage image;

@@ -9,11 +9,10 @@
  *   CID font (STSong-Light) for non-ASCII runs, so no font file is embedded;
  * - deterministic output: no timestamps, no object stream compression.
  *
- * The interface names still carry the historical `qw_mupdf_*` prefix because
- * they are the boundary declared in `mupdf_backend.h`; there is no MuPDF code,
- * header or library involved. */
+ * The boundary is declared in the private `document_backend.h`; no MuPDF code,
+ * header or library is involved. */
 
-#include "mupdf_backend.h"
+#include "document_backend.h"
 
 #include <stdarg.h>
 #include <stdio.h>
@@ -923,7 +922,7 @@ static int pdf_render_html(const char *html, size_t html_size,
     return QW_STATUS_OK;
 }
 
-int qw_mupdf_convert_html_with_page_size(const char *html, size_t html_size,
+int qw_doc_convert_html_with_page_size(const char *html, size_t html_size,
                                          float page_width_points,
                                          float page_height_points,
                                          uint8_t **out_pdf, size_t *out_size,
@@ -945,23 +944,23 @@ int qw_mupdf_convert_html_with_page_size(const char *html, size_t html_size,
     return QW_STATUS_OK;
 }
 
-int qw_mupdf_convert_html(const char *html, size_t html_size,
+int qw_doc_convert_html(const char *html, size_t html_size,
                           uint8_t **out_pdf, size_t *out_size,
                           QwConvertReport *report)
 {
-    return qw_mupdf_convert_html_with_page_size(html, html_size, 595.0f, 842.0f,
+    return qw_doc_convert_html_with_page_size(html, html_size, 595.0f, 842.0f,
                                                 out_pdf, out_size, report);
 }
 
-int qw_mupdf_convert_html_to_stream(const char *html, size_t html_size,
+int qw_doc_convert_html_to_stream(const char *html, size_t html_size,
                                     FILE *stream, size_t max_output_bytes,
                                     size_t *out_size, QwConvertReport *report)
 {
-    return qw_mupdf_convert_html_with_page_size_to_stream(
+    return qw_doc_convert_html_with_page_size_to_stream(
         html, html_size, 595.0f, 842.0f, stream, max_output_bytes, out_size, report);
 }
 
-int qw_mupdf_convert_html_with_page_size_to_stream(
+int qw_doc_convert_html_with_page_size_to_stream(
     const char *html, size_t html_size, float page_width_points,
     float page_height_points, FILE *stream, size_t max_output_bytes,
     size_t *out_size, QwConvertReport *report)
@@ -990,7 +989,7 @@ int qw_mupdf_convert_html_with_page_size_to_stream(
     return QW_STATUS_OK;
 }
 
-int qw_mupdf_convert_html_file(const char *path, uint8_t **out_pdf,
+int qw_doc_convert_html_file(const char *path, uint8_t **out_pdf,
                                size_t *out_size, QwConvertReport *report)
 {
     FILE *file;
@@ -1023,12 +1022,12 @@ int qw_mupdf_convert_html_file(const char *path, uint8_t **out_pdf,
         free(buffer);
         return QW_STATUS_ERR_IO;
     }
-    rc = qw_mupdf_convert_html(buffer, read_size, out_pdf, out_size, report);
+    rc = qw_doc_convert_html(buffer, read_size, out_pdf, out_size, report);
     free(buffer);
     return rc;
 }
 
-int qw_mupdf_convert_html_file_to_stream(const char *path, FILE *stream,
+int qw_doc_convert_html_file_to_stream(const char *path, FILE *stream,
                                          size_t max_output_bytes,
                                          size_t *out_size,
                                          QwConvertReport *report)
@@ -1037,7 +1036,7 @@ int qw_mupdf_convert_html_file_to_stream(const char *path, FILE *stream,
     size_t pdf_size = 0u;
     int rc;
     if (!path || !stream) return QW_STATUS_ERR_INVALID_ARGUMENT;
-    rc = qw_mupdf_convert_html_file(path, &pdf, &pdf_size, report);
+    rc = qw_doc_convert_html_file(path, &pdf, &pdf_size, report);
     if (rc != QW_STATUS_OK) return rc;
     if (max_output_bytes && pdf_size > max_output_bytes) {
         free(pdf);

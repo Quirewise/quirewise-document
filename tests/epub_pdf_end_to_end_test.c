@@ -1,7 +1,7 @@
 #include <quirewise/convert.h>
 #include <quirewise/document.h>
 
-#include "../src/backends/mupdf_backend.h"
+#include "../src/backends/document_backend.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -53,7 +53,7 @@ int main(void)
     uint8_t *pdf = NULL;
     size_t pdf_size = 0u;
     QwConvertReport report;
-    QwMuPdfReader *reader = NULL;
+    QwPdfReader *reader = NULL;
     size_t pages = 0u;
     uint8_t *text = NULL;
     size_t text_size = 0u;
@@ -64,7 +64,7 @@ int main(void)
         fprintf(stderr, "cannot read EPUB fixture: %s\n", QUIREWISE_EPUB_FIXTURE);
         return 1;
     }
-    rc = qw_mupdf_convert_memory(epub, epub_size, "epub", 1, &pdf, &pdf_size,
+    rc = qw_doc_convert_memory(epub, epub_size, "epub", 1, &pdf, &pdf_size,
                                  &report);
     free(epub);
     if (rc != 0 || !pdf || pdf_size < 5u) {
@@ -83,14 +83,14 @@ int main(void)
         free(pdf);
         return 4;
     }
-    rc = qw_mupdf_pdf_reader_open(pdf, pdf_size, &reader, &pages, &report);
+    rc = qw_pdf_reader_open(pdf, pdf_size, &reader, &pages, &report);
     if (rc != 0 || !reader || pages < 1u) {
         fprintf(stderr, "rendered PDF has no pages: rc=%d pages=%zu\n", rc, pages);
         free(pdf);
         return 5;
     }
-    rc = qw_mupdf_pdf_reader_extract_text(reader, &text, &text_size, &report);
-    qw_mupdf_pdf_reader_close(reader);
+    rc = qw_pdf_reader_extract_text(reader, &text, &text_size, &report);
+    qw_pdf_reader_close(reader);
     if (rc != 0 || !text) {
         fprintf(stderr, "text extraction failed: rc=%d\n", rc);
         free(pdf);

@@ -1,5 +1,5 @@
 #include "quirewise/convert.h"
-#include "mupdf_backend.h"
+#include "document_backend.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -89,17 +89,17 @@ int main(void)
     }
 
     /* The historical convert-memory entry renders ODT/FODT/HTML internally. */
-    CHECK(qw_mupdf_convert_memory((const uint8_t *)FODT, strlen(FODT), ".fodt", 0,
+    CHECK(qw_doc_convert_memory((const uint8_t *)FODT, strlen(FODT), ".fodt", 0,
                                   &pdf, &pdf_size, &report) == QW_STATUS_OK);
     CHECK(is_pdf(pdf, pdf_size));
     free(pdf);
     pdf = NULL;
-    CHECK(qw_mupdf_convert_memory((const uint8_t *)FODT, strlen(FODT), NULL, 0,
+    CHECK(qw_doc_convert_memory((const uint8_t *)FODT, strlen(FODT), NULL, 0,
                                   &pdf, &pdf_size, NULL) == QW_STATUS_OK);
     CHECK(is_pdf(pdf, pdf_size));
     free(pdf);
     pdf = NULL;
-    CHECK(qw_mupdf_convert_memory((const uint8_t *)HTML, strlen(HTML), ".html", 0,
+    CHECK(qw_doc_convert_memory((const uint8_t *)HTML, strlen(HTML), ".html", 0,
                                   &pdf, &pdf_size, NULL) == QW_STATUS_OK);
     CHECK(is_pdf(pdf, pdf_size));
     free(pdf);
@@ -107,7 +107,7 @@ int main(void)
     {
         static const char small_pdf[] = "%PDF-1.4\n%%EOF\n";
         size_t expected = sizeof(small_pdf) - 1u;
-        CHECK(qw_mupdf_convert_memory((const uint8_t *)small_pdf, expected, ".pdf",
+        CHECK(qw_doc_convert_memory((const uint8_t *)small_pdf, expected, ".pdf",
                                       0, &pdf, &pdf_size, NULL) == QW_STATUS_OK);
         CHECK(pdf_size == expected);
         free(pdf);
@@ -115,10 +115,10 @@ int main(void)
     }
     {
         static const uint8_t junk[] = {0x01u, 0x02u, 0x03u, 0x04u};
-        CHECK(qw_mupdf_convert_memory(junk, sizeof(junk), ".bin", 0, &pdf,
+        CHECK(qw_doc_convert_memory(junk, sizeof(junk), ".bin", 0, &pdf,
                                       &pdf_size, NULL) == QW_STATUS_ERR_UNSUPPORTED);
         pdf = NULL;
-        CHECK(qw_mupdf_convert_memory((const uint8_t *)FODT, strlen(FODT), ".fodt",
+        CHECK(qw_doc_convert_memory((const uint8_t *)FODT, strlen(FODT), ".fodt",
                                       1, &pdf, &pdf_size, NULL) == QW_STATUS_OK);
         CHECK(is_pdf(pdf, pdf_size));
         free(pdf);

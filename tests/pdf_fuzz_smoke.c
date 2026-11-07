@@ -5,7 +5,7 @@
  * opens, extracts and closes cleanly, or is rejected with a defined status; any
  * memory error aborts under ASan/UBSan. */
 
-#include "mupdf_backend.h"
+#include "document_backend.h"
 
 #include <stdint.h>
 #include <stdio.h>
@@ -53,17 +53,17 @@ static int load(const char *path, uint8_t **out_data, size_t *out_size)
 
 static void exercise(const uint8_t *data, size_t size)
 {
-    QwMuPdfReader *reader = NULL;
+    QwPdfReader *reader = NULL;
     size_t pages = 0u;
-    int rc = qw_mupdf_pdf_reader_open(data, size, &reader, &pages, NULL);
+    int rc = qw_pdf_reader_open(data, size, &reader, &pages, NULL);
     if (rc == QW_STATUS_OK) {
         uint8_t *text = NULL;
         size_t text_size = 0u;
-        if (qw_mupdf_pdf_reader_extract_text(reader, &text, &text_size, NULL) ==
+        if (qw_pdf_reader_extract_text(reader, &text, &text_size, NULL) ==
             QW_STATUS_OK) {
             free(text);
         }
-        qw_mupdf_pdf_reader_close(reader);
+        qw_pdf_reader_close(reader);
     } else {
         /* Every rejection path must leave the reader unset. */
         if (reader != NULL) abort();

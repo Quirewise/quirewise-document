@@ -1,4 +1,4 @@
-#include "mupdf_backend.h"
+#include "document_backend.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -59,7 +59,7 @@ int main(void)
     char trailer[64];
 
     memset(&report, 0, sizeof(report));
-    CHECK(qw_mupdf_convert_html(SAMPLE_HTML, strlen(SAMPLE_HTML), &pdf, &size,
+    CHECK(qw_doc_convert_html(SAMPLE_HTML, strlen(SAMPLE_HTML), &pdf, &size,
                                 &report) == QW_STATUS_OK);
     CHECK(pdf != NULL && size > 200u);
     CHECK(memcmp(pdf, "%PDF-1.4", 8u) == 0);
@@ -77,12 +77,12 @@ int main(void)
     CHECK(!contains_ascii(pdf, size, "636F6C6F723A726564"));
 
     /* Deterministic output: the same input renders byte-identically. */
-    CHECK(qw_mupdf_convert_html(SAMPLE_HTML, strlen(SAMPLE_HTML), &again,
+    CHECK(qw_doc_convert_html(SAMPLE_HTML, strlen(SAMPLE_HTML), &again,
                                 &again_size, NULL) == QW_STATUS_OK);
     CHECK(again_size == size && memcmp(again, pdf, size) == 0);
 
     /* Empty input still produces one renderable page. */
-    CHECK(qw_mupdf_convert_html("", 0u, &empty, &empty_size, NULL) == QW_STATUS_OK);
+    CHECK(qw_doc_convert_html("", 0u, &empty, &empty_size, NULL) == QW_STATUS_OK);
     CHECK(empty_size > 100u && count_occurrences(empty, empty_size, "/Type /Page ") == 1u);
 
     /* startxref must point at the cross-reference table. */
@@ -105,7 +105,7 @@ int main(void)
     CHECK(contains_ascii(pdf, size, trailer));
 
     /* Invalid arguments are rejected. */
-    CHECK(qw_mupdf_convert_html(SAMPLE_HTML, strlen(SAMPLE_HTML), NULL, &size,
+    CHECK(qw_doc_convert_html(SAMPLE_HTML, strlen(SAMPLE_HTML), NULL, &size,
                                 NULL) == QW_STATUS_ERR_INVALID_ARGUMENT);
 
     free(pdf);

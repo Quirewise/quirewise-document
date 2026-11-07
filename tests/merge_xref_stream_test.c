@@ -1,7 +1,7 @@
 #include <quirewise/convert.h>
 #include <quirewise/document.h>
 
-#include "../src/backends/mupdf_backend.h"
+#include "../src/backends/document_backend.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -39,7 +39,7 @@ int main(void)
     size_t merged_size = 0u;
     size_t pages = 0u;
     QwConvertReport report;
-    QwMuPdfReader *reader = NULL;
+    QwPdfReader *reader = NULL;
     size_t reader_pages = 0u;
     int rc;
     pdf_size = sizeof(xref_prefix) - 1u + sizeof(entries) +
@@ -55,7 +55,7 @@ int main(void)
     sizes[0] = pdf_size;
     sizes[1] = pdf_size;
     memset(&report, 0, sizeof(report));
-    rc = qw_mupdf_merge_pdf_documents(pdfs, sizes, 2u, &merged, &merged_size,
+    rc = qw_pdf_merge_documents(pdfs, sizes, 2u, &merged, &merged_size,
                                       &pages, &report);
     if (rc != 0 || !merged || pages != 2u) {
         fprintf(stderr, "xref-stream merge failed: rc=%d pages=%zu note=%s\n",
@@ -64,17 +64,17 @@ int main(void)
         free(pdf);
         return 2;
     }
-    rc = qw_mupdf_pdf_reader_open(merged, merged_size, &reader, &reader_pages,
+    rc = qw_pdf_reader_open(merged, merged_size, &reader, &reader_pages,
                                   &report);
     if (rc != 0 || reader_pages != 2u) {
         fprintf(stderr, "merged xref-stream PDF does not open: rc=%d pages=%zu\n",
                 rc, reader_pages);
-        qw_mupdf_pdf_reader_close(reader);
+        qw_pdf_reader_close(reader);
         free(merged);
         free(pdf);
         return 3;
     }
-    qw_mupdf_pdf_reader_close(reader);
+    qw_pdf_reader_close(reader);
     free(merged);
     free(pdf);
     puts("PDF merge accepts xref-stream documents and writes a classic xref");

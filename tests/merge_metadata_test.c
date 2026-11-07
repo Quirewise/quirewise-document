@@ -1,7 +1,7 @@
 #include <quirewise/convert.h>
 #include <quirewise/document.h>
 
-#include "../src/backends/mupdf_backend.h"
+#include "../src/backends/document_backend.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -50,7 +50,7 @@ int main(void)
     size_t merged_size = 0u;
     size_t pages = 0u;
     QwConvertReport report;
-    QwMuPdfReader *reader = NULL;
+    QwPdfReader *reader = NULL;
     size_t reader_pages = 0u;
     int rc;
     pdfs[0] = (const uint8_t *)first_pdf;
@@ -58,7 +58,7 @@ int main(void)
     sizes[0] = sizeof(first_pdf) - 1u;
     sizes[1] = sizeof(second_pdf) - 1u;
     memset(&report, 0, sizeof(report));
-    rc = qw_mupdf_merge_pdf_documents(pdfs, sizes, 2u, &merged, &merged_size,
+    rc = qw_pdf_merge_documents(pdfs, sizes, 2u, &merged, &merged_size,
                                       &pages, &report);
     if (rc != 0 || !merged || pages != 2u) {
         fprintf(stderr, "merge failed: rc=%d pages=%zu note=%s\n", rc, pages,
@@ -78,16 +78,16 @@ int main(void)
         free(merged);
         return 3;
     }
-    rc = qw_mupdf_pdf_reader_open(merged, merged_size, &reader, &reader_pages,
+    rc = qw_pdf_reader_open(merged, merged_size, &reader, &reader_pages,
                                   &report);
     if (rc != 0 || reader_pages != 2u) {
         fprintf(stderr, "merged PDF does not open: rc=%d pages=%zu\n", rc,
                 reader_pages);
-        qw_mupdf_pdf_reader_close(reader);
+        qw_pdf_reader_close(reader);
         free(merged);
         return 4;
     }
-    qw_mupdf_pdf_reader_close(reader);
+    qw_pdf_reader_close(reader);
     free(merged);
     puts("PDF merge preserves /Outlines and /Info");
     return 0;

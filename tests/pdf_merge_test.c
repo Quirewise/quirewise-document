@@ -1,4 +1,4 @@
-#include "mupdf_backend.h"
+#include "document_backend.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -42,16 +42,16 @@ int main(void)
     QwConvertReport report;
 
     memset(&report, 0, sizeof(report));
-    CHECK(qw_mupdf_convert_html(first, strlen(first), &pdf_a, &size_a, NULL) ==
+    CHECK(qw_doc_convert_html(first, strlen(first), &pdf_a, &size_a, NULL) ==
           QW_STATUS_OK);
-    CHECK(qw_mupdf_convert_html(second, strlen(second), &pdf_b, &size_b, NULL) ==
+    CHECK(qw_doc_convert_html(second, strlen(second), &pdf_b, &size_b, NULL) ==
           QW_STATUS_OK);
 
     inputs[0] = pdf_a;
     inputs[1] = pdf_b;
     sizes[0] = size_a;
     sizes[1] = size_b;
-    CHECK(qw_mupdf_merge_pdf_documents(inputs, sizes, 2u, &merged, &merged_size,
+    CHECK(qw_pdf_merge_documents(inputs, sizes, 2u, &merged, &merged_size,
                                        &merged_pages, &report) == QW_STATUS_OK);
     CHECK(merged != NULL && merged_size > 400u);
     CHECK(merged_pages == 2u);
@@ -63,19 +63,19 @@ int main(void)
     /* The merged document must be readable by the internal reader and contain
      * text from both inputs. */
     {
-        QwMuPdfReader *reader = NULL;
+        QwPdfReader *reader = NULL;
         size_t pages = 0u;
         uint8_t *text = NULL;
         size_t text_size = 0u;
-        CHECK(qw_mupdf_pdf_reader_open(merged, merged_size, &reader, &pages, NULL) ==
+        CHECK(qw_pdf_reader_open(merged, merged_size, &reader, &pages, NULL) ==
               QW_STATUS_OK);
         CHECK(pages == 2u);
-        CHECK(qw_mupdf_pdf_reader_extract_text(reader, &text, &text_size, NULL) ==
+        CHECK(qw_pdf_reader_extract_text(reader, &text, &text_size, NULL) ==
               QW_STATUS_OK);
         CHECK(contains(text, text_size, "Merged document one"));
         CHECK(contains(text, text_size, "Merged document two"));
         free(text);
-        qw_mupdf_pdf_reader_close(reader);
+        qw_pdf_reader_close(reader);
     }
 
     /* Merging one input keeps its page count. */
@@ -83,7 +83,7 @@ int main(void)
         uint8_t *single = NULL;
         size_t single_size = 0u;
         size_t single_pages = 0u;
-        CHECK(qw_mupdf_merge_pdf_documents(inputs, sizes, 1u, &single, &single_size,
+        CHECK(qw_pdf_merge_documents(inputs, sizes, 1u, &single, &single_size,
                                            &single_pages, NULL) == QW_STATUS_OK);
         CHECK(single_pages == 1u);
         free(single);
@@ -96,10 +96,10 @@ int main(void)
     {
         uint8_t *scratch = NULL;
         size_t scratch_size = 0u;
-        CHECK(qw_mupdf_merge_pdf_documents(NULL, sizes, 2u, &scratch, &scratch_size,
+        CHECK(qw_pdf_merge_documents(NULL, sizes, 2u, &scratch, &scratch_size,
                                            NULL, NULL) ==
               QW_STATUS_ERR_INVALID_ARGUMENT);
-        CHECK(qw_mupdf_merge_pdf_documents(inputs, sizes, 0u, &scratch, &scratch_size,
+        CHECK(qw_pdf_merge_documents(inputs, sizes, 0u, &scratch, &scratch_size,
                                            NULL, NULL) ==
               QW_STATUS_ERR_INVALID_ARGUMENT);
         CHECK(scratch == NULL && scratch_size == 0u);
@@ -110,7 +110,7 @@ int main(void)
         size_t bad_size[1] = {sizeof(junk)};
         uint8_t *scratch = NULL;
         size_t scratch_size = 0u;
-        CHECK(qw_mupdf_merge_pdf_documents(bad, bad_size, 1u, &scratch, &scratch_size,
+        CHECK(qw_pdf_merge_documents(bad, bad_size, 1u, &scratch, &scratch_size,
                                            NULL, NULL) == QW_STATUS_ERR_FORMAT);
         CHECK(scratch == NULL);
     }

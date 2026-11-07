@@ -16,7 +16,7 @@
 #include <quirewise/convert.h>
 
 #include "format_registry.h"
-#include "../backends/mupdf_backend.h"
+#include "../backends/document_backend.h"
 #include "../formats/odt/odt_format.h"
 #include "../formats/docx/docx_format.h"
 
@@ -116,7 +116,7 @@ int qw_convert_to_pdf_memory(const void *data, size_t size,
     if (bytes[0] == '<' &&
         (contains_text(bytes, size, "<html") || contains_text(bytes, size, "<p") ||
          contains_text(bytes, size, "<h1"))) {
-        rc = qw_mupdf_convert_html((const char *)bytes, size, out_pdf, out_size,
+        rc = qw_doc_convert_html((const char *)bytes, size, out_pdf, out_size,
                                    report);
         return rc;
     }
@@ -380,7 +380,7 @@ static int fb2_to_pdf_internal(const uint8_t *data, size_t size,
         qw_fb2_document_free(document);
         return QW_STATUS_ERR_FORMAT;
     }
-    status = qw_mupdf_convert_html((const char *)html, html_size, out_pdf,
+    status = qw_doc_convert_html((const char *)html, html_size, out_pdf,
                                    out_size, report);
     qw_fb2_document_free(document);
     if (status == QW_STATUS_OK && report) {
@@ -447,7 +447,7 @@ static int csv_to_pdf_internal(const uint8_t *data, size_t size,
                           strlen("</table></body></html>"));
     qw_spreadsheet_document_free(document);
     if (!html) return QW_STATUS_ERR_OUT_OF_MEMORY;
-    status = qw_mupdf_convert_html(html, html_size, out_pdf, out_size, report);
+    status = qw_doc_convert_html(html, html_size, out_pdf, out_size, report);
     free(html);
     if (status == QW_STATUS_OK && report) {
         snprintf(report->note, sizeof(report->note),
@@ -457,7 +457,7 @@ static int csv_to_pdf_internal(const uint8_t *data, size_t size,
     return status;
 }
 
-int qw_mupdf_convert_memory(const uint8_t *data, size_t size,
+int qw_doc_convert_memory(const uint8_t *data, size_t size,
                             const char *input_extension, int reflow_epub,
                             uint8_t **out_pdf, size_t *out_size,
                             QwConvertReport *report)
@@ -486,7 +486,7 @@ int qw_mupdf_convert_memory(const uint8_t *data, size_t size,
         int epub_status = epub_to_html_internal(data, size, &epub_html,
                                                 &epub_html_size, report);
         if (epub_status != QW_STATUS_OK) return epub_status;
-        epub_status = qw_mupdf_convert_html(epub_html, epub_html_size, out_pdf,
+        epub_status = qw_doc_convert_html(epub_html, epub_html_size, out_pdf,
                                             out_size, report);
         free(epub_html);
         if (epub_status == QW_STATUS_OK && report) {
@@ -579,11 +579,11 @@ int qw_mupdf_convert_memory(const uint8_t *data, size_t size,
     if (layout.width_twips > 0u && layout.height_twips > 0u) {
         float width = (float)layout.width_twips / 20.0f;
         float height = (float)layout.height_twips / 20.0f;
-        rc = qw_mupdf_convert_html_with_page_size((const char *)html, html_size,
+        rc = qw_doc_convert_html_with_page_size((const char *)html, html_size,
                                                   width, height, out_pdf, out_size,
                                                   report);
     } else {
-        rc = qw_mupdf_convert_html((const char *)html, html_size, out_pdf,
+        rc = qw_doc_convert_html((const char *)html, html_size, out_pdf,
                                    out_size, report);
     }
     free(html);

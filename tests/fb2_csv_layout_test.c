@@ -1,7 +1,7 @@
 #include <quirewise/convert.h>
 #include <quirewise/document.h>
 
-#include "../src/backends/mupdf_backend.h"
+#include "../src/backends/document_backend.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -25,13 +25,13 @@ static int convert_and_check(const char *text, const char *extension,
     uint8_t *pdf = NULL;
     size_t pdf_size = 0u;
     QwConvertReport report;
-    QwMuPdfReader *reader = NULL;
+    QwPdfReader *reader = NULL;
     size_t pages = 0u;
     uint8_t *extracted = NULL;
     size_t extracted_size = 0u;
     int rc;
     memset(&report, 0, sizeof(report));
-    rc = qw_mupdf_convert_memory((const uint8_t *)text, strlen(text), extension,
+    rc = qw_doc_convert_memory((const uint8_t *)text, strlen(text), extension,
                                  0, &pdf, &pdf_size, &report);
     if (rc != 0 || !pdf) {
         fprintf(stderr, "%s conversion failed: rc=%d note=%s\n", label, rc,
@@ -44,17 +44,17 @@ static int convert_and_check(const char *text, const char *extension,
         free(pdf);
         return 2;
     }
-    rc = qw_mupdf_pdf_reader_open(pdf, pdf_size, &reader, &pages, &report);
+    rc = qw_pdf_reader_open(pdf, pdf_size, &reader, &pages, &report);
     if (rc != 0 || pages < 1u) {
         fprintf(stderr, "%s PDF does not open: rc=%d pages=%zu\n", label, rc,
                 pages);
-        qw_mupdf_pdf_reader_close(reader);
+        qw_pdf_reader_close(reader);
         free(pdf);
         return 3;
     }
-    rc = qw_mupdf_pdf_reader_extract_text(reader, &extracted, &extracted_size,
+    rc = qw_pdf_reader_extract_text(reader, &extracted, &extracted_size,
                                           &report);
-    qw_mupdf_pdf_reader_close(reader);
+    qw_pdf_reader_close(reader);
     if (rc != 0 || !extracted || !contains(extracted, extracted_size, needle)) {
         fprintf(stderr, "%s text missing %s: %.*s\n", label, needle,
                 (int)(extracted ? extracted_size : 0u),

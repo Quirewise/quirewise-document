@@ -1,7 +1,7 @@
 #include <quirewise/convert.h>
 #include <quirewise/document.h>
 
-#include "../src/backends/mupdf_backend.h"
+#include "../src/backends/document_backend.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -20,13 +20,13 @@ static const char rect_pdf[] =
 
 int main(void)
 {
-    QwMuPdfReader *reader = NULL;
+    QwPdfReader *reader = NULL;
     size_t pages = 0u;
     QwPageImage page;
     QwConvertReport report;
     int rc;
     memset(&report, 0, sizeof(report));
-    rc = qw_mupdf_pdf_reader_open((const uint8_t *)rect_pdf,
+    rc = qw_pdf_reader_open((const uint8_t *)rect_pdf,
                                   sizeof(rect_pdf) - 1u, &reader, &pages,
                                   &report);
     if (rc != 0 || !reader || pages != 1u) {
@@ -35,11 +35,11 @@ int main(void)
         return 1;
     }
     memset(&page, 0, sizeof(page));
-    rc = qw_mupdf_pdf_reader_render_page(reader, 0u, 72u, &page, &report);
+    rc = qw_pdf_reader_render_page(reader, 0u, 72u, &page, &report);
     if (rc != 0 || !page.data || page.width != 144u || page.height != 72u) {
         fprintf(stderr, "rect render failed: rc=%d %ux%u note=%s\n", rc,
                 page.width, page.height, report.note);
-        qw_mupdf_pdf_reader_close(reader);
+        qw_pdf_reader_close(reader);
         return 2;
     }
     {
@@ -49,25 +49,25 @@ int main(void)
             fprintf(stderr, "left half is not red: %u,%u,%u\n", left[0],
                     left[1], left[2]);
             free((void *)page.data);
-            qw_mupdf_pdf_reader_close(reader);
+            qw_pdf_reader_close(reader);
             return 3;
         }
         if (!(right[0] == 255u && right[1] == 255u && right[2] == 255u)) {
             fprintf(stderr, "right half is not white: %u,%u,%u\n", right[0],
                     right[1], right[2]);
             free((void *)page.data);
-            qw_mupdf_pdf_reader_close(reader);
+            qw_pdf_reader_close(reader);
             return 4;
         }
     }
     if (!strstr(report.note, "1 painted object")) {
         fprintf(stderr, "rectangle count missing: %s\n", report.note);
         free((void *)page.data);
-        qw_mupdf_pdf_reader_close(reader);
+        qw_pdf_reader_close(reader);
         return 5;
     }
     free((void *)page.data);
-    qw_mupdf_pdf_reader_close(reader);
+    qw_pdf_reader_close(reader);
     puts("PDF content painting: red left half, white right half at 72dpi");
     return 0;
 }
