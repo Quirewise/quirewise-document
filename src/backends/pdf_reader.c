@@ -2921,7 +2921,9 @@ static void pdf_blit_image(const QwImage *image, uint8_t *pixels, size_t width,
                                    (right - left));
         for (row = bottom; row < top; ++row) {
             size_t inverted = height - 1u - row;
-            size_t source_y = (size_t)((row - bottom) * (size_t)image->height /
+            /* row counts PDF page units from the bottom while the image's
+             * first row is its top, so the sampling runs backwards. */
+            size_t source_y = (size_t)(((top - 1u) - row) * (size_t)image->height /
                                        (top - bottom));
             size_t destination = (inverted * width + column) * 3u;
             const uint8_t *source;
@@ -2986,7 +2988,7 @@ static int pdf_draw_raw_image(const char *dict, size_t dict_size,
     }
     if (pdf_memmem(dict, dict_size, "/DCTDecode", 10u) ||
         pdf_memmem(dict, dict_size, "/JPXDecode", 10u) ||
-        pdf_memmem(dict, dict_size, "/CCITTFaxDecode", 16u) ||
+        pdf_memmem(dict, dict_size, "/CCITTFaxDecode", 15u) ||
         pdf_memmem(dict, dict_size, "/JBIG2Decode", 12u) ||
         pdf_memmem(dict, dict_size, "/ImageMask", 10u)) {
         return 0;
@@ -3042,6 +3044,55 @@ static int pdf_draw_raw_image(const char *dict, size_t dict_size,
     return 1;
 }
 
+/* Bitonal pages from the PDF writer use /CCITTFaxDecode; the raw-sample path
+ * rejects that filter, so decode it here and blit the samples. */
+static int pdf_draw_ccitt_image(const char *dict, size_t dict_size,
+                                const uint8_t *stream, size_t stream_size,
+                                uint8_t *pixels, size_t width, size_t height,
+                                const PdfMatrix *ctm)
+{
+    long columns;
+    long rows;
+    long k;
+    int black_is1 = 0;
+    uint8_t *gray = NULL;
+    QwImage image;
+    if (!pdf_memmem(dict, dict_size, "/CCITTFaxDecode", 15u)) return 0;
+    k = pdf_parse_int_field(dict, dict_size, "/K", 0);
+    if (k >= 0) return 0; /* Group 3 (modified Huffman/READ) is not handled */
+    columns = pdf_parse_int_field(dict, dict_size, "/Columns", -1);
+    rows = pdf_parse_int_field(dict, dict_size, "/Rows", -1);
+    if (columns <= 0 || rows <= 0) {
+        columns = pdf_parse_int_field(dict, dict_size, "/Width", -1);
+        rows = pdf_parse_int_field(dict, dict_size, "/Height", -1);
+    }
+    if (columns <= 0 || rows <= 0 || columns > 20000 || rows > 20000) return 0;
+    {
+        const char *flag = pdf_memmem(dict, dict_size, "/BlackIs1", 9u);
+        if (flag) {
+            size_t after = (size_t)(flag - dict) + 9u;
+            while (after < dict_size && isspace((unsigned char)dict[after])) ++after;
+            if (after + 4u <= dict_size && memcmp(dict + after, "true", 4u) == 0) {
+                black_is1 = 1;
+            }
+        }
+    }
+    if (!pdf_ccitt_decode_image(stream, stream_size, (uint32_t)columns,
+                                (uint32_t)rows, black_is1, &gray)) {
+        return 0;
+    }
+    memset(&image, 0, sizeof(image));
+    image.pixels = gray;
+    image.size = (size_t)columns * (size_t)rows;
+    image.stride = (size_t)columns;
+    image.width = (uint32_t)columns;
+    image.height = (uint32_t)rows;
+    image.format = QW_IMAGE_PIXEL_GRAY8;
+    pdf_blit_image(&image, pixels, width, height, ctm);
+    free(gray);
+    return 1;
+}
+
 static int pdf_draw_image_xobject(const QwPdfReader *reader, size_t object,
                                   uint8_t *pixels, size_t width, size_t height,
                                   const PdfMatrix *ctm)
@@ -3057,6 +3108,11 @@ static int pdf_draw_image_xobject(const QwPdfReader *reader, size_t object,
     if (!stream) return 0;
     if (pdf_draw_raw_image(body, dict_size, stream, stream_size, pixels,
                            width, height, ctm)) {
+        free(stream);
+        return 1;
+    }
+    if (pdf_draw_ccitt_image(body, dict_size, stream, stream_size, pixels,
+                             width, height, ctm)) {
         free(stream);
         return 1;
     }
