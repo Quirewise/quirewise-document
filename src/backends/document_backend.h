@@ -125,4 +125,14 @@ int qw_pdf_merge_documents(const uint8_t *const *pdfs,
                                  size_t *out_pages,
                                  QwConvertReport *report);
 
+
+/* Decode an ITU-T T.6 (CCITT Group 4) stream into GRAY8 samples (0 = black,
+ * 255 = white) with the polarity PDF's /BlackIs1 flag asks for. Returns 1 on
+ * success and hands ownership of *out_gray8 to the caller. */
+int pdf_ccitt_decode_image(const uint8_t *data,
+                           size_t size,
+                           uint32_t width,
+                           uint32_t height,
+                           int black_is1,
+                           uint8_t **out_gray8);
 #endif
