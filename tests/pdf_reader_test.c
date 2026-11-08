@@ -105,7 +105,7 @@ int main(int argc, char **argv)
     {
         QwPageImage image;
         memset(&image, 0, sizeof(image));
-        CHECK(qw_pdf_render_page(pdf, pdf_size, 0u, 144u, &image, NULL) ==
+        CHECK(qw_pdf_render_page_memory(pdf, pdf_size, 0u, 144u, &image, NULL) ==
               QW_STATUS_OK);
         CHECK(image.data != NULL && image.size > 0u);
         CHECK(image.kind == QW_PAGE_IMAGE_RGB24);

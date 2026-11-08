@@ -235,4 +235,170 @@ if(BUILD_TESTING)
     target_link_libraries(quirewise_document_pdf_merge_test PRIVATE quirewise_document)
     add_test(NAME quirewise_document_pdf_merge
         COMMAND quirewise_document_pdf_merge_test)
+
+    add_executable(quirewise_document_pdf_objstm_reader_test
+        tests/pdf_objstm_reader_test.c)
+    target_compile_features(quirewise_document_pdf_objstm_reader_test PRIVATE c_std_11)
+    target_include_directories(quirewise_document_pdf_objstm_reader_test PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}/src/backends")
+    target_link_libraries(quirewise_document_pdf_objstm_reader_test PRIVATE
+        quirewise_document)
+    add_test(NAME quirewise_document_pdf_objstm_reader
+        COMMAND quirewise_document_pdf_objstm_reader_test)
+
+    add_executable(quirewise_document_pdf_reader_r3_test
+        tests/pdf_reader_r3_test.c)
+    target_compile_features(quirewise_document_pdf_reader_r3_test PRIVATE c_std_11)
+    target_include_directories(quirewise_document_pdf_reader_r3_test PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}/src/backends")
+    target_compile_definitions(quirewise_document_pdf_reader_r3_test PRIVATE
+        QUIREWISE_R3_PDF="${CMAKE_CURRENT_SOURCE_DIR}/tests/data/encrypted-r3.pdf"
+        QUIREWISE_R3_OBJSTM_PDF="${CMAKE_CURRENT_SOURCE_DIR}/tests/data/encrypted-r3-objstm.pdf")
+    target_link_libraries(quirewise_document_pdf_reader_r3_test PRIVATE
+        quirewise_document)
+    add_test(NAME quirewise_document_pdf_reader_r3
+        COMMAND quirewise_document_pdf_reader_r3_test)
+
+    add_executable(quirewise_document_pdf_reader_aes_test
+        tests/pdf_reader_aes_test.c)
+    target_compile_features(quirewise_document_pdf_reader_aes_test PRIVATE c_std_11)
+    target_include_directories(quirewise_document_pdf_reader_aes_test PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}/src/backends")
+    target_compile_definitions(quirewise_document_pdf_reader_aes_test PRIVATE
+        QUIREWISE_AES_PDF="${CMAKE_CURRENT_SOURCE_DIR}/tests/data/encrypted-aes.pdf"
+        QUIREWISE_AES_OBJSTM_PDF="${CMAKE_CURRENT_SOURCE_DIR}/tests/data/encrypted-aes-objstm.pdf")
+    target_link_libraries(quirewise_document_pdf_reader_aes_test PRIVATE
+        quirewise_document)
+    add_test(NAME quirewise_document_pdf_reader_aes
+        COMMAND quirewise_document_pdf_reader_aes_test)
+
+    add_executable(quirewise_document_pdf_reader_mutool_test
+        tests/pdf_reader_mutool_encryption_test.c)
+    target_compile_features(quirewise_document_pdf_reader_mutool_test PRIVATE c_std_11)
+    target_include_directories(quirewise_document_pdf_reader_mutool_test PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}/src/backends")
+    target_compile_definitions(quirewise_document_pdf_reader_mutool_test PRIVATE
+        QUIREWISE_MUTOOL_AES128_PDF="${CMAKE_CURRENT_SOURCE_DIR}/tests/data/encrypted-mutool-aes128.pdf"
+        QUIREWISE_MUTOOL_AES256_PDF="${CMAKE_CURRENT_SOURCE_DIR}/tests/data/encrypted-mutool-aes256.pdf"
+        QUIREWISE_MUTOOL_AES256_USERPW_PDF="${CMAKE_CURRENT_SOURCE_DIR}/tests/data/encrypted-mutool-aes256-userpw.pdf")
+    target_link_libraries(quirewise_document_pdf_reader_mutool_test PRIVATE
+        quirewise_document)
+    add_test(NAME quirewise_document_pdf_reader_mutool
+        COMMAND quirewise_document_pdf_reader_mutool_test)
+
+    add_executable(quirewise_document_pdf_tounicode_test
+        tests/pdf_tounicode_test.c)
+    target_compile_features(quirewise_document_pdf_tounicode_test PRIVATE c_std_11)
+    target_include_directories(quirewise_document_pdf_tounicode_test PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}/src/backends")
+    target_link_libraries(quirewise_document_pdf_tounicode_test PRIVATE
+        quirewise_document)
+    add_test(NAME quirewise_document_pdf_tounicode
+        COMMAND quirewise_document_pdf_tounicode_test)
+
+    add_executable(quirewise_document_pdf_xref_advanced_test
+        tests/pdf_xref_advanced_test.c)
+    target_compile_features(quirewise_document_pdf_xref_advanced_test PRIVATE c_std_11)
+    target_include_directories(quirewise_document_pdf_xref_advanced_test PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}/src/backends")
+    target_link_libraries(quirewise_document_pdf_xref_advanced_test PRIVATE
+        quirewise_document)
+    add_test(NAME quirewise_document_pdf_xref_advanced
+        COMMAND quirewise_document_pdf_xref_advanced_test)
+
+    add_executable(quirewise_document_pdf_stream_length_test
+        tests/pdf_stream_length_test.c)
+    target_compile_features(quirewise_document_pdf_stream_length_test PRIVATE c_std_11)
+    target_include_directories(quirewise_document_pdf_stream_length_test PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}/src/backends")
+    target_link_libraries(quirewise_document_pdf_stream_length_test PRIVATE
+        quirewise_document)
+    add_test(NAME quirewise_document_pdf_stream_length
+        COMMAND quirewise_document_pdf_stream_length_test)
+
+    add_executable(quirewise_document_pdf_flate_image_test
+        tests/pdf_flate_image_test.c)
+    target_compile_features(quirewise_document_pdf_flate_image_test PRIVATE c_std_11)
+    target_include_directories(quirewise_document_pdf_flate_image_test PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}/src/backends")
+    target_link_libraries(quirewise_document_pdf_flate_image_test PRIVATE
+        quirewise_document)
+    add_test(NAME quirewise_document_pdf_flate_image
+        COMMAND quirewise_document_pdf_flate_image_test)
+
+    add_executable(quirewise_document_pdf_merge_encrypted_test
+        tests/pdf_merge_encrypted_test.c)
+    target_compile_features(quirewise_document_pdf_merge_encrypted_test PRIVATE c_std_11)
+    target_include_directories(quirewise_document_pdf_merge_encrypted_test PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}/src/backends")
+    target_compile_definitions(quirewise_document_pdf_merge_encrypted_test PRIVATE
+        QUIREWISE_ENCRYPTED_PDF="${CMAKE_CURRENT_SOURCE_DIR}/tests/data/encrypted-rc4.pdf")
+    target_link_libraries(quirewise_document_pdf_merge_encrypted_test PRIVATE
+        quirewise_document)
+    add_test(NAME quirewise_document_pdf_merge_encrypted
+        COMMAND quirewise_document_pdf_merge_encrypted_test)
+
+    add_executable(quirewise_document_pdf_public_api_test
+        tests/pdf_public_api_test.c)
+    target_compile_features(quirewise_document_pdf_public_api_test PRIVATE c_std_11)
+    target_link_libraries(quirewise_document_pdf_public_api_test PRIVATE
+        quirewise_document)
+    add_test(NAME quirewise_document_pdf_public_api
+        COMMAND quirewise_document_pdf_public_api_test)
+
+    add_executable(quirewise_document_pdf_convert_route_test
+        tests/pdf_convert_route_test.c)
+    target_compile_features(quirewise_document_pdf_convert_route_test PRIVATE c_std_11)
+    target_link_libraries(quirewise_document_pdf_convert_route_test PRIVATE
+        quirewise_document)
+    add_test(NAME quirewise_document_pdf_convert_route
+        COMMAND quirewise_document_pdf_convert_route_test)
+
+    add_executable(quirewise_document_pdf_corpus_test tests/pdf_corpus_test.c)
+    target_compile_features(quirewise_document_pdf_corpus_test PRIVATE c_std_11)
+    target_compile_definitions(quirewise_document_pdf_corpus_test PRIVATE
+        QUIREWISE_PDF_CORPUS_DIR="${CMAKE_CURRENT_SOURCE_DIR}/../../app/testfile/pdf")
+    target_link_libraries(quirewise_document_pdf_corpus_test PRIVATE
+        quirewise_document)
+    add_test(NAME quirewise_document_pdf_corpus
+        COMMAND quirewise_document_pdf_corpus_test)
+
+    add_executable(quirewise_document_pdf_page_order_test
+        tests/pdf_page_order_test.c)
+    target_compile_features(quirewise_document_pdf_page_order_test PRIVATE c_std_11)
+    target_include_directories(quirewise_document_pdf_page_order_test PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}/src/backends")
+    target_link_libraries(quirewise_document_pdf_page_order_test PRIVATE
+        quirewise_document)
+    add_test(NAME quirewise_document_pdf_page_order
+        COMMAND quirewise_document_pdf_page_order_test)
+
+    add_executable(quirewise_document_pdf_text_render_test
+        tests/pdf_text_render_test.c)
+    target_compile_features(quirewise_document_pdf_text_render_test PRIVATE c_std_11)
+    target_include_directories(quirewise_document_pdf_text_render_test PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}/src/backends")
+    target_link_libraries(quirewise_document_pdf_text_render_test PRIVATE
+        quirewise_document)
+    add_test(NAME quirewise_document_pdf_text_render
+        COMMAND quirewise_document_pdf_text_render_test)
+
+    add_executable(quirewise_document_pdf_xref_test tests/pdf_xref_test.c)
+    target_compile_features(quirewise_document_pdf_xref_test PRIVATE c_std_11)
+    target_include_directories(quirewise_document_pdf_xref_test PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}/src/backends")
+    target_link_libraries(quirewise_document_pdf_xref_test PRIVATE
+        quirewise_document)
+    add_test(NAME quirewise_document_pdf_xref
+        COMMAND quirewise_document_pdf_xref_test)
+
+    add_executable(quirewise_document_pdf_merge_incremental_test
+        tests/pdf_merge_incremental_test.c)
+    target_compile_features(quirewise_document_pdf_merge_incremental_test PRIVATE c_std_11)
+    target_include_directories(quirewise_document_pdf_merge_incremental_test PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}/src/backends")
+    target_link_libraries(quirewise_document_pdf_merge_incremental_test PRIVATE
+        quirewise_document)
+    add_test(NAME quirewise_document_pdf_merge_incremental
+        COMMAND quirewise_document_pdf_merge_incremental_test)
 endif()

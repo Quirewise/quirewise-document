@@ -39,7 +39,38 @@ extern const QwFormatDescriptor qw_format_ppsx;
 extern const QwFormatDescriptor qw_format_pptm;
 extern const QwFormatDescriptor qw_format_pptx;
 
+/* PDF has no content probe: detection is the "%PDF-" magic in the converter.
+ * The descriptor exists so the format is enumerable and its input budget is
+ * declared instead of leaving qw_format_pdf undefined. */
+static const QwFormatInputResourceProfile qw_pdf_resource_profile = {
+    QW_INPUT_RESOURCE_MAX_ARCHIVE_INPUT_BYTES,
+    QW_INPUT_RESOURCE_MAX_ARCHIVE_ENTRIES,
+    QW_INPUT_RESOURCE_MAX_ARCHIVE_ENTRY_BYTES,
+    QW_INPUT_RESOURCE_MAX_ARCHIVE_TOTAL_BYTES,
+    QW_INPUT_RESOURCE_MAX_IMAGE_DIMENSION,
+    QW_INPUT_RESOURCE_MAX_DECODED_PIXELS,
+    QW_INPUT_BACKEND_POLICY_FORMAT_METADATA,
+    QW_INPUT_LIFECYCLE_TYPED_DOCUMENT_DISPOSE
+};
+
+const QwFormatDescriptor qw_format_pdf = {
+    QW_FORMAT_PDF,
+    "PDF",
+    QW_FORMAT_CAP_PDF_DOCUMENT | QW_FORMAT_CAP_MULTI_PAGE,
+    NULL, /* probe */
+    NULL, /* open_memory */
+    NULL, /* open_layout */
+    NULL, /* open_audio */
+    QW_FORMAT_INPUT_LIMIT_DEFAULT,
+    &qw_pdf_resource_profile,
+    NULL, /* convert_to_pdf */
+    NULL, /* open_spreadsheet */
+    NULL, /* open_subtitle */
+    NULL  /* open_data */
+};
+
 static const QwFormatDescriptor *const qw_format_registry[] = {
+    &qw_format_pdf,
     &qw_format_eml,
     &qw_format_fodp,
     &qw_format_fodt,

@@ -6,10 +6,13 @@
  * catalog plus page tree lists every page in input order. A classic
  * cross-reference table is written.
  *
- * Documents whose pages live in compressed object streams (or that use
- * cross-reference streams) are rejected with `QW_STATUS_ERR_UNSUPPORTED`:
- * rebuilding such a graph needs a full xref-stream writer, which this backend
- * does not provide yet. No MuPDF code is involved. */
+ * Compressed object streams are expanded by appending their members as plain
+ * objects before the graph is rebuilt; cross-reference streams are not parsed
+ * but are copied as ordinary objects, so such inputs only survive when their
+ * pages are reachable through the text scan below. Encrypted inputs are
+ * rejected with `QW_STATUS_ERR_UNSUPPORTED`: copying ciphertext into a new
+ * file without an /Encrypt dictionary produces a document no reader can open.
+ * No MuPDF code is involved. */
 
 #include "document_backend.h"
 #include <quirewise/compression.h>
@@ -28,6 +31,7 @@ typedef struct QwMergeObject {
     size_t input_index;
     size_t number;
     size_t new_number;
+    size_t position; /* body offset inside the input: later wins on duplicates */
     const char *body;
     size_t body_size;
     const char *stream;
@@ -317,6 +321,15 @@ static int merge_expand_object_streams(const uint8_t *data, size_t size,
     return 2;
 }
 
+static int merge_object_compare(const void *left, const void *right)
+{
+    const QwMergeObject *a = (const QwMergeObject *)left;
+    const QwMergeObject *b = (const QwMergeObject *)right;
+    if (a->number != b->number) return a->number < b->number ? -1 : 1;
+    if (a->position != b->position) return a->position < b->position ? -1 : 1;
+    return 0;
+}
+
 static int merge_collect_objects(const QwMergeInput *input, size_t input_index,
                                  QwMergeObject **out_objects, size_t *out_count)
 {
@@ -387,12 +400,33 @@ static int merge_collect_objects(const QwMergeInput *input, size_t input_index,
                     free(objects);
                     return 0;
                 }
-                stream_payload = payload;
-                stream_size_value = (size_t)(endstream - payload);
-                while (stream_size_value &&
-                       (payload[stream_size_value - 1u] == '\n' ||
-                        payload[stream_size_value - 1u] == '\r')) {
-                    stream_size_value -= 1u;
+                {
+                    stream_payload = payload;
+                    /* Copy exactly /Length bytes when the declared length is
+                     * plausible; trimming trailing EOLs silently shortens
+                     * streams whose last byte is a newline and leaves the
+                     * dictionary /Length inconsistent with the payload. */
+                    long declared = merge_parse_dict_int(body, dict_size,
+                                                         "/Length", -1);
+                    int used_declared = 0;
+                    if (declared >= 0 &&
+                        (size_t)declared <= (size_t)(endobj - payload)) {
+                        const char *after = payload + (size_t)declared;
+                        const char *check = merge_memmem(
+                            after, (size_t)(endobj - after), "endstream", 9u);
+                        if (check && (size_t)(check - after) <= 4u) {
+                            stream_size_value = (size_t)declared;
+                            used_declared = 1;
+                        }
+                    }
+                    if (!used_declared) {
+                        stream_size_value = (size_t)(endstream - payload);
+                        while (stream_size_value &&
+                               (payload[stream_size_value - 1u] == '\n' ||
+                                payload[stream_size_value - 1u] == '\r')) {
+                            stream_size_value -= 1u;
+                        }
+                    }
                 }
             }
         }
@@ -414,6 +448,7 @@ static int merge_collect_objects(const QwMergeInput *input, size_t input_index,
         objects[count].input_index = input_index;
         objects[count].number = number;
         objects[count].new_number = 0u;
+        objects[count].position = (size_t)(body - data);
         objects[count].body = body;
         objects[count].body_size = dict_size;
         objects[count].stream = stream_payload;
@@ -421,13 +456,51 @@ static int merge_collect_objects(const QwMergeInput *input, size_t input_index,
         count += 1u;
         position = (size_t)(endobj - data) + 6u;
     }
+    /* Incremental updates redefine objects at the end of the file. Keep only
+     * the newest definition per number; copying both would emit duplicate
+     * object numbers into the merged document. */
+    if (count > 1u) {
+        size_t read_index;
+        size_t write_index = 0u;
+        qsort(objects, count, sizeof(*objects), merge_object_compare);
+        for (read_index = 0u; read_index < count; ++read_index) {
+            if (write_index &&
+                objects[write_index - 1u].number == objects[read_index].number) {
+                objects[write_index - 1u] = objects[read_index];
+            } else {
+                objects[write_index++] = objects[read_index];
+            }
+        }
+        count = write_index;
+    }
     *out_objects = objects;
     *out_count = count;
     return count > 0u;
 }
 
+static int merge_output_reserve(char **output, size_t *capacity, size_t needed)
+{
+    size_t next;
+    char *grown;
+    if (needed <= *capacity) return 1;
+    next = *capacity ? *capacity : 256u;
+    while (next < needed) {
+        if (next > SIZE_MAX / 2u) {
+            next = needed;
+            break;
+        }
+        next *= 2u;
+    }
+    grown = (char *)realloc(*output, next);
+    if (!grown) return 0;
+    *output = grown;
+    *capacity = next;
+    return 1;
+}
+
 static char *merge_rewrite_references(const char *text, size_t size, size_t offset,
-                                      size_t new_parent, size_t *out_size)
+                                      size_t new_parent, int is_page,
+                                      size_t *out_size)
 {
     size_t capacity = size * 3u + 64u;
     char *output = (char *)malloc(capacity);
@@ -436,6 +509,8 @@ static char *merge_rewrite_references(const char *text, size_t size, size_t offs
     if (!output) return NULL;
     while (index < size) {
         if (isdigit((unsigned char)text[index])) {
+            char token[32];
+            size_t token_size;
             size_t value = 0u;
             while (index < size && isdigit((unsigned char)text[index])) {
                 value = value * 10u + (size_t)(text[index] - '0');
@@ -454,15 +529,30 @@ static char *merge_rewrite_references(const char *text, size_t size, size_t offs
                 if (look >= 7u && memcmp(output + look - 7u, "/Parent", 7u) == 0) {
                     is_parent = 1;
                 }
-                position += (size_t)snprintf(output + position, capacity - position,
-                                             "%zu 0 R",
-                                             is_parent ? new_parent : value + offset);
+                /* Only a page's /Parent points at the new page tree. Outline
+                 * items and form fields keep their own parent, which is
+                 * remapped by the per-input offset like any other reference. */
+                token_size = (size_t)snprintf(token, sizeof(token), "%zu 0 R",
+                                              is_parent && is_page
+                                                  ? new_parent
+                                                  : value + offset);
                 index += consumed;
-                continue;
+            } else {
+                token_size = (size_t)snprintf(token, sizeof(token), "%zu", value);
             }
-            position += (size_t)snprintf(output + position, capacity - position, "%zu",
-                                         value);
+            if (token_size >= sizeof(token) ||
+                !merge_output_reserve(&output, &capacity,
+                                      position + token_size + 1u)) {
+                free(output);
+                return NULL;
+            }
+            memcpy(output + position, token, token_size);
+            position += token_size;
             continue;
+        }
+        if (!merge_output_reserve(&output, &capacity, position + 2u)) {
+            free(output);
+            return NULL;
         }
         output[position++] = text[index++];
     }
@@ -504,6 +594,14 @@ int qw_pdf_merge_documents(const uint8_t *const *pdfs, const size_t *sizes,
         }
         if (sizes[index] < 8u || memcmp(pdfs[index], "%PDF-", 5u) != 0) {
             return QW_STATUS_ERR_FORMAT;
+        }
+        if (merge_memmem((const char *)pdfs[index], sizes[index], "/Encrypt",
+                         8u)) {
+            if (report) {
+                snprintf(report->note, sizeof(report->note),
+                         "Encrypted PDF inputs cannot be merged; decrypt them first");
+            }
+            return QW_STATUS_ERR_UNSUPPORTED;
         }
     }
 
@@ -555,7 +653,43 @@ int qw_pdf_merge_documents(const uint8_t *const *pdfs, const size_t *sizes,
             }
             goto cleanup;
         }
-        while (scan < size) {
+        /* Page order comes from the catalog tree, not from where the page
+         * objects happen to sit in the file. The marker scan below only
+         * covers inputs whose catalog the reader cannot open. */
+        {
+            QwPdfReader *page_reader = NULL;
+            size_t reader_pages = 0u;
+            if (qw_pdf_reader_open(inputs[input_index].data,
+                                   inputs[input_index].size, &page_reader,
+                                   &reader_pages, NULL) == QW_STATUS_OK &&
+                page_reader) {
+                size_t page_index;
+                for (page_index = 0u; page_index < reader_pages; ++page_index) {
+                    size_t object = qw_pdf_reader_page_object(page_reader,
+                                                              page_index);
+                    QwMergePage *resized;
+                    if (!object) continue;
+                    if (page_total + pages_found >= QW_MERGE_MAX_PAGES) {
+                        qw_pdf_reader_close(page_reader);
+                        rc = QW_STATUS_ERR_RESOURCE_LIMIT;
+                        goto cleanup;
+                    }
+                    resized = (QwMergePage *)realloc(
+                        pages, (page_total + pages_found + 1u) * sizeof(*pages));
+                    if (!resized) {
+                        qw_pdf_reader_close(page_reader);
+                        rc = QW_STATUS_ERR_OUT_OF_MEMORY;
+                        goto cleanup;
+                    }
+                    pages = resized;
+                    pages[page_total + pages_found].input_index = input_index;
+                    pages[page_total + pages_found].object_number = object;
+                    pages_found += 1u;
+                }
+                qw_pdf_reader_close(page_reader);
+            }
+        }
+        while (!pages_found && scan < size) {
             const char *found = merge_find_typed(data + scan, size - scan, "Page");
             size_t object = 0u;
             if (!found) break;
@@ -651,9 +785,11 @@ int qw_pdf_merge_documents(const uint8_t *const *pdfs, const size_t *sizes,
                     rc = QW_STATUS_ERR_FORMAT;
                     goto cleanup;
                 }
-                rewritten = merge_rewrite_references(entry->body, entry->body_size,
-                                                     offset, pages_object,
-                                                     &rewritten_size);
+                rewritten = merge_rewrite_references(
+                    entry->body, entry->body_size, offset, pages_object,
+                    merge_find_typed(entry->body, entry->body_size, "Page") !=
+                        NULL,
+                    &rewritten_size);
                 if (!rewritten) {
                     rc = QW_STATUS_ERR_OUT_OF_MEMORY;
                     goto cleanup;

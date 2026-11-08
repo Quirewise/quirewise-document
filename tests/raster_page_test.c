@@ -7,14 +7,14 @@
 #include <stdlib.h>
 #include <string.h>
 
-static int all_white(const QwPageImage *page)
+static int has_ink(const QwPageImage *page)
 {
     size_t index;
     if (!page->data || !page->width || !page->height) return 0;
     for (index = 0u; index < page->width * (size_t)page->height * 3u; ++index) {
-        if (page->data[index] != 0xffu) return 0;
+        if (page->data[index] != 0xffu) return 1;
     }
-    return 1;
+    return 0;
 }
 
 int main(void)
@@ -49,7 +49,7 @@ int main(void)
         return 3;
     }
     if (page.kind != QW_PAGE_IMAGE_RGB24 || page.width != 144u ||
-        page.height != 72u || page.size != 144u * 72u * 3u || !all_white(&page)) {
+        page.height != 72u || page.size != 144u * 72u * 3u || !has_ink(&page)) {
         fprintf(stderr, "unexpected 72dpi raster: kind=%d %ux%u size=%zu\n",
                 page.kind, page.width, page.height, page.size);
         free((void *)page.data);
@@ -94,6 +94,7 @@ int main(void)
     }
     qw_pdf_reader_close(reader);
     free(pdf);
-    puts("PDF rasterisation: 144x72 page at 72dpi -> 144x72 RGB24, 144dpi -> 288x144");
+    puts("PDF rasterisation: 144x72 page at 72dpi -> 144x72 RGB24 with text ink, "
+         "144dpi -> 288x144");
     return 0;
 }

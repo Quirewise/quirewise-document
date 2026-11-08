@@ -73,7 +73,7 @@ int qw_doc_decode_caj_jp2(const uint8_t *data,
                             QwPageImage *out_page,
                             QwConvertReport *report);
 
-int qw_pdf_render_page(const uint8_t *data,
+int qw_pdf_render_page_memory(const uint8_t *data,
                              size_t size,
                              size_t page_index,
                              unsigned int dpi,
@@ -85,6 +85,19 @@ int qw_pdf_reader_open(const uint8_t *data,
                              QwPdfReader **out_reader,
                              size_t *out_page_count,
                              QwConvertReport *report);
+/* Open without requiring a supported security handler: page dictionaries are
+ * unencrypted, so page count and boxes remain available. */
+int qw_pdf_reader_open_structure(const uint8_t *data,
+                                       size_t size,
+                                       QwPdfReader **out_reader,
+                                       size_t *out_page_count,
+                                       QwConvertReport *report);
+/* Media/crop boxes (points) and rotation for one page. */
+int qw_pdf_reader_page_geometry(const QwPdfReader *reader,
+                                      size_t page_index,
+                                      double media[4],
+                                      double crop[4],
+                                      int *rotation);
 int qw_pdf_reader_render_page(QwPdfReader *reader,
                                     size_t page_index,
                                     unsigned int dpi,
@@ -100,6 +113,8 @@ int qw_pdf_reader_extract_text_to_stream(
     size_t max_output_bytes,
     size_t *out_size,
     QwConvertReport *report);
+/* Object number of a page in document order; 0 when the index is invalid. */
+size_t qw_pdf_reader_page_object(const QwPdfReader *reader, size_t index);
 void qw_pdf_reader_close(QwPdfReader *reader);
 
 int qw_pdf_merge_documents(const uint8_t *const *pdfs,

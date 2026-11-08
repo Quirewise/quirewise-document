@@ -14,8 +14,10 @@
  * No MuPDF code is involved. */
 
 #include <quirewise/convert.h>
+#include <quirewise/pdf.h>
 
 #include "format_registry.h"
+#include "png_encoder.h"
 #include "../backends/document_backend.h"
 #include "../formats/odt/odt_format.h"
 #include "../formats/docx/docx_format.h"
@@ -588,4 +590,122 @@ int qw_doc_convert_memory(const uint8_t *data, size_t size,
     }
     free(html);
     return rc;
+}
+
+void qw_buffer_free(void *buffer)
+{
+    free(buffer);
+}
+
+/* PDF input routes that produce something other than PDF. */
+
+#define QW_PDF_ROUTE_DPI 144u
+
+static int pdf_route_to_text(const uint8_t *data, size_t size,
+                             uint8_t **out_data, size_t *out_size,
+                             QwConvertReport *report)
+{
+    QwPdfDocument *document = NULL;
+    size_t pages = 0u;
+    uint8_t *text = NULL;
+    size_t text_size = 0u;
+    int rc = qw_pdf_open(data, size, &document, &pages, report);
+    if (rc != QW_STATUS_OK) return rc;
+    rc = qw_pdf_extract_text(document, &text, &text_size, report);
+    qw_pdf_close(document);
+    if (rc != QW_STATUS_OK) {
+        free(text);
+        return rc;
+    }
+    *out_data = text;
+    *out_size = text_size;
+    if (report) {
+        report->pages_written = pages;
+        report->output_size = text_size;
+        snprintf(report->note, sizeof(report->note),
+                 "PDF text extraction: %zu page(s), no OCR "
+                 "(QW_ROUTE_LOSS_TEXT_LAYOUT)", pages);
+    }
+    return QW_STATUS_OK;
+}
+
+static int pdf_route_to_png(const uint8_t *data, size_t size,
+                            uint8_t **out_data, size_t *out_size,
+                            QwConvertReport *report)
+{
+    QwPdfDocument *document = NULL;
+    size_t pages = 0u;
+    QwPageImage page;
+    int rc;
+    memset(&page, 0, sizeof(page));
+    rc = qw_pdf_open(data, size, &document, &pages, report);
+    if (rc != QW_STATUS_OK) return rc;
+    rc = qw_pdf_render_page(document, 0u, QW_PDF_ROUTE_DPI, &page, report);
+    if (rc == QW_STATUS_OK) {
+        rc = qw_png_encode_page(&page, out_data, out_size);
+    }
+    qw_pdf_page_free(&page);
+    qw_pdf_close(document);
+    if (rc == QW_STATUS_OK && report) {
+        report->pages_written = 1u;
+        report->output_size = *out_size;
+        snprintf(report->note, sizeof(report->note),
+                 "PNG output rendered the first of %zu page(s) at %u dpi; "
+                 "text is not painted (QW_ROUTE_LOSS_RASTERIZATION)",
+                 pages, (unsigned)QW_PDF_ROUTE_DPI);
+    }
+    return rc;
+}
+
+int qw_convert_to_format_memory(const void *data, size_t size,
+                                QwOutputFormat output_format,
+                                const QwConvertOptions *options,
+                                uint8_t **out_data, size_t *out_size,
+                                QwConvertReport *report)
+{
+    const uint8_t *bytes = (const uint8_t *)data;
+    (void)options;
+    if (!out_data || !out_size) return QW_STATUS_ERR_INVALID_ARGUMENT;
+    *out_data = NULL;
+    *out_size = 0u;
+    if (!bytes || !size) return QW_STATUS_ERR_INVALID_ARGUMENT;
+    if (report) {
+        report->output_format = output_format;
+        report->pages_written = 0u;
+        report->output_size = 0u;
+        report->stage = QW_CONVERT_STAGE_EXECUTE;
+    }
+    if (convert_region_equals(bytes, size, 0u, "%PDF-")) {
+        if (report) report->format = QW_FORMAT_PDF;
+        switch (output_format) {
+        case QW_FORMAT_PDF:
+            return pdf_passthrough(bytes, size, out_data, out_size, report);
+        case QW_FORMAT_TXT:
+            return pdf_route_to_text(bytes, size, out_data, out_size, report);
+        case QW_FORMAT_PNG:
+            return pdf_route_to_png(bytes, size, out_data, out_size, report);
+        case QW_FORMAT_JPG:
+            if (report) {
+                snprintf(report->note, sizeof(report->note),
+                         "JPEG output needs an encoder this package does not "
+                         "ship; request PNG or TXT instead");
+            }
+            return QW_STATUS_ERR_UNSUPPORTED;
+        default:
+            if (report) {
+                snprintf(report->note, sizeof(report->note),
+                         "No PDF output route for the requested format");
+            }
+            return QW_STATUS_ERR_UNSUPPORTED;
+        }
+    }
+    if (output_format == QW_FORMAT_PDF) {
+        return qw_doc_convert_memory(bytes, size, NULL, 0, out_data, out_size,
+                                     report);
+    }
+    if (report) {
+        snprintf(report->note, sizeof(report->note),
+                 "Only PDF inputs have a non-PDF output route in this package");
+    }
+    return QW_STATUS_ERR_UNSUPPORTED;
 }
