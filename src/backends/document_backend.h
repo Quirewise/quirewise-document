@@ -135,4 +135,16 @@ int pdf_ccitt_decode_image(const uint8_t *data,
                            uint32_t height,
                            int black_is1,
                            uint8_t **out_gray8);
+
+/* Decode a PDF JBIG2 image stream (optionally preceded by the /JBIG2Globals
+ * segments) into GRAY8 samples (0 = black, 255 = white). Returns 1 on success,
+ * QW_STATUS_ERR_UNSUPPORTED when the stream uses segment types this decoder
+ * does not implement, or 0 for malformed input. */
+int pdf_jbig2_decode_image(const uint8_t *globals,
+                           size_t globals_size,
+                           const uint8_t *data,
+                           size_t size,
+                           uint32_t width_hint,
+                           uint32_t height_hint,
+                           uint8_t **out_gray8);
 #endif

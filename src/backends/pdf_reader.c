@@ -3044,6 +3044,103 @@ static int pdf_draw_raw_image(const char *dict, size_t dict_size,
     return 1;
 }
 
+/* A bilevel image may carry "/Decode [1 0]" to invert the sample polarity.
+ * The raw-sample path applies /Decode itself; the CCITT and JBIG2 decoders
+ * return device values, so they invert after the fact. */
+static int pdf_decode_inverts(const char *dict, size_t dict_size)
+{
+    const char *decode = pdf_memmem(dict, dict_size, "/Decode", 7u);
+    size_t index;
+    if (!decode) return 0;
+    for (index = 7u; index < 24u; ++index) {
+        const char *cursor = decode + index;
+        if (cursor >= dict + dict_size) break;
+        if (*cursor == '[') {
+            ++cursor;
+            while (cursor < dict + dict_size && (*cursor == ' ' || *cursor == '\t')) ++cursor;
+            if (cursor < dict + dict_size && *cursor == '1') {
+                ++cursor;
+                while (cursor < dict + dict_size && (*cursor == ' ' || *cursor == '\t')) ++cursor;
+                if (cursor < dict + dict_size && *cursor == '0') return 1;
+            }
+            return 0;
+        }
+        if (*cursor == ']' || *cursor == '>') return 0;
+    }
+    return 0;
+}
+
+static void pdf_invert_gray(uint8_t *gray, size_t count)
+{
+    size_t index;
+    for (index = 0u; index < count; ++index) {
+        gray[index] = (uint8_t)(255u - gray[index]);
+    }
+}
+/* JBIG2 image streams live in a segment stream; /JBIG2Globals, when present,
+ * carries the shared segments in a separate object. */
+static int pdf_draw_jbig2_image(const char *dict, size_t dict_size,
+                                const uint8_t *stream, size_t stream_size,
+                                uint8_t *pixels, size_t width, size_t height,
+                                const PdfMatrix *ctm, const QwPdfReader *reader)
+{
+    long image_width;
+    long image_height;
+    uint8_t *gray = NULL;
+    uint8_t *globals = NULL;
+    size_t globals_size = 0u;
+    QwImage image;
+    int status;
+    if (!pdf_memmem(dict, dict_size, "/JBIG2Decode", 12u)) return 0;
+    image_width = pdf_parse_int_field(dict, dict_size, "/Width", -1);
+    image_height = pdf_parse_int_field(dict, dict_size, "/Height", -1);
+    if (image_width <= 0 || image_height <= 0 ||
+        image_width > 20000 || image_height > 20000) {
+        return 0;
+    }
+    {
+        const char *ref = pdf_memmem(dict, dict_size, "/JBIG2Globals", 13u);
+        if (ref) {
+            const char *cursor = ref + 13u;
+            const char *limit = dict + dict_size;
+            long object = -1;
+            while (cursor < limit && (*cursor == ' ' || *cursor == '\t' ||
+                                      *cursor == '\r' || *cursor == '\n')) {
+                ++cursor;
+            }
+            if (cursor < limit && *cursor >= '0' && *cursor <= '9') {
+                object = 0;
+                while (cursor < limit && *cursor >= '0' && *cursor <= '9') {
+                    object = object * 10 + (*cursor - '0');
+                    if (object > 1000000) { object = -1; break; }
+                    ++cursor;
+                }
+            }
+            if (object > 0 && reader) {
+                globals = pdf_object_stream(reader, (size_t)object, &globals_size);
+            }
+        }
+    }
+    status = pdf_jbig2_decode_image(globals, globals_size, stream, stream_size,
+                                    (uint32_t)image_width, (uint32_t)image_height,
+                                    &gray);
+    free(globals);
+    if (status != 1 || !gray) return 0;
+    if (pdf_decode_inverts(dict, dict_size)) {
+        pdf_invert_gray(gray, (size_t)image_width * (size_t)image_height);
+    }
+    memset(&image, 0, sizeof(image));
+    image.pixels = gray;
+    image.size = (size_t)image_width * (size_t)image_height;
+    image.stride = (size_t)image_width;
+    image.width = (uint32_t)image_width;
+    image.height = (uint32_t)image_height;
+    image.format = QW_IMAGE_PIXEL_GRAY8;
+    pdf_blit_image(&image, pixels, width, height, ctm);
+    free(gray);
+    return 1;
+}
+
 /* Bitonal pages from the PDF writer use /CCITTFaxDecode; the raw-sample path
  * rejects that filter, so decode it here and blit the samples. */
 static int pdf_draw_ccitt_image(const char *dict, size_t dict_size,
@@ -3081,6 +3178,9 @@ static int pdf_draw_ccitt_image(const char *dict, size_t dict_size,
                                 (uint32_t)rows, black_is1, &gray)) {
         return 0;
     }
+    if (pdf_decode_inverts(dict, dict_size)) {
+        pdf_invert_gray(gray, (size_t)columns * (size_t)rows);
+    }
     memset(&image, 0, sizeof(image));
     image.pixels = gray;
     image.size = (size_t)columns * (size_t)rows;
@@ -3113,6 +3213,11 @@ static int pdf_draw_image_xobject(const QwPdfReader *reader, size_t object,
     }
     if (pdf_draw_ccitt_image(body, dict_size, stream, stream_size, pixels,
                              width, height, ctm)) {
+        free(stream);
+        return 1;
+    }
+    if (pdf_draw_jbig2_image(body, dict_size, stream, stream_size, pixels,
+                             width, height, ctm, reader)) {
         free(stream);
         return 1;
     }
