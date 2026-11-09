@@ -349,6 +349,9 @@ static int jb2_decode_generic_region(const uint8_t *data, size_t size, Jb2Bitmap
     if (!mmr) {
         if (size < 26u) return 0;
         if (template_id != 0) return QW_STATUS_ERR_UNSUPPORTED;
+        /* Typical prediction would skip decoded rows; ignoring it silently
+         * corrupts the region, so refuse it instead. */
+        if (flags & 0x08u) return QW_STATUS_ERR_UNSUPPORTED;
         if (!jb2_decode_arithmetic_region(data, size, width, height, out)) return 0;
         return 1;
     }
