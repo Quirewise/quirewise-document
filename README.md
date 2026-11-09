@@ -16,11 +16,11 @@ The rasteriser decodes these image XObject filters:
 | `/DCTDecode` (JPEG) | supported |
 | `/JPXDecode` (JPEG 2000) | supported, JP2 containers and raw codestreams |
 | `/CCITTFaxDecode` (Group 4) | supported |
-| `/JBIG2Decode` | generic regions with MMR coding; arithmetic-coded regions, symbol dictionaries, text regions, halftones and refinement return `QW_STATUS_ERR_UNSUPPORTED` instead of drawing a partial page |
+| `/JBIG2Decode` | generic regions with MMR or arithmetic (T.88) coding, template 0, page composition; templates 1-3, symbol dictionaries, text regions, halftones and refinement return `QW_STATUS_ERR_UNSUPPORTED` instead of drawing a partial page |
 
 `/Decode [1 0]` is honoured for the bitonal filters, `/JBIG2Globals` is
-resolved through the object stream, and images are rasterised with the correct
-orientation.
+resolved through the object stream, and content is scaled by the requested
+resolution (72 scale factor applied to the content matrix).
 
 ## Tests
 

@@ -3588,6 +3588,7 @@ static int pdf_paint_content(const QwPdfReader *reader,
                              const PdfImageRef *images, size_t image_count,
                              const uint8_t *stream, size_t size,
                              uint8_t *pixels, size_t width, size_t height,
+                             double device_scale,
                              size_t *painted, int *skipped_text_or_image)
 {
     size_t position = 0u;
@@ -3613,7 +3614,12 @@ static int pdf_paint_content(const QwPdfReader *reader,
     int text_skipped = 0;
     last_name[0] = '\0';
     pdf_path_reset(&path);
+    /* Content coordinates are PDF points; multiply them into device pixels. */
     pdf_matrix_reset(&ctm);
+    if (device_scale > 0.0) {
+        ctm.a = device_scale;
+        ctm.d = device_scale;
+    }
     pdf_matrix_reset(&text_matrix);
     pdf_matrix_reset(&line_matrix);
     while (position < size) {
@@ -4027,7 +4033,8 @@ int qw_pdf_reader_render_page(QwPdfReader *reader, size_t page_index,
                     if (stream) {
                         (void)pdf_paint_content(reader, images, image_count,
                                                 stream, stream_size, pixels,
-                                                width, height, &painted,
+                                                width, height,
+                                                (double)dpi / 72.0, &painted,
                                                 &skipped_text_or_image);
                         free(stream);
                     }

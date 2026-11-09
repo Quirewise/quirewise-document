@@ -115,6 +115,215 @@ static int jb2_compose(Jb2Bitmap *page, const Jb2Bitmap *region, int32_t x0, int
     return 1;
 }
 
+/* T.88 Annex E arithmetic decoder (the JBIG2 MQ coder). The register C holds
+ * complemented bytes and each byte carries seven usable bits when it follows
+ * 0xFF, so this is not the JPEG 2000 variant of the MQ coder. */
+static const uint16_t jb2_arith_qe[47] = {
+    0x5601u, 0x3401u, 0x1801u, 0x0ac1u, 0x0521u, 0x0221u, 0x5601u,
+    0x5401u, 0x4801u, 0x3801u, 0x3001u, 0x2401u, 0x1c01u, 0x1601u,
+    0x5601u, 0x5401u, 0x5101u, 0x4801u, 0x3801u, 0x3401u, 0x3001u,
+    0x2801u, 0x2401u, 0x2201u, 0x1c01u, 0x1801u, 0x1601u, 0x1401u,
+    0x1201u, 0x1101u, 0x0ac1u, 0x09c1u, 0x08a1u, 0x0521u, 0x0441u,
+    0x02a1u, 0x0221u, 0x0141u, 0x0111u, 0x0085u, 0x0049u, 0x0025u,
+    0x0015u, 0x0009u, 0x0005u, 0x0001u, 0x5601u
+};
+
+static const uint8_t jb2_arith_nmps[47] = {
+    1u, 2u, 3u, 4u, 5u, 38u, 7u, 8u, 9u, 10u, 11u, 12u, 13u, 29u, 15u,
+    16u, 17u, 18u, 19u, 20u, 21u, 22u, 23u, 24u, 25u, 26u, 27u, 28u,
+    29u, 30u, 31u, 32u, 33u, 34u, 35u, 36u, 37u, 38u, 39u, 40u, 41u,
+    42u, 43u, 44u, 45u, 45u, 46u
+};
+
+static const uint8_t jb2_arith_nlps[47] = {
+    1u, 6u, 9u, 12u, 29u, 33u, 6u, 14u, 14u, 14u, 17u, 18u, 20u, 21u,
+    14u, 14u, 15u, 16u, 17u, 18u, 19u, 19u, 20u, 21u, 22u, 23u, 24u,
+    25u, 26u, 27u, 28u, 29u, 30u, 31u, 32u, 33u, 34u, 35u, 36u, 37u,
+    38u, 39u, 40u, 41u, 42u, 43u, 46u
+};
+
+static const uint8_t jb2_arith_switch[47] = {
+    1u, 0u, 0u, 0u, 0u, 0u, 1u, 0u, 0u, 0u, 0u, 0u, 0u, 0u, 1u, 0u,
+    0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u,
+    0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u
+};
+
+typedef struct Jb2Arith {
+    const uint8_t *data;
+    size_t size;
+    size_t position;
+    uint32_t code;
+    uint16_t interval;
+    int bits_left;
+    int previous;
+} Jb2Arith;
+
+static int jb2_arith_read_byte(Jb2Arith *arith)
+{
+    if (arith->position >= arith->size) return -1;
+    return arith->data[arith->position++];
+}
+
+static void jb2_arith_byte_in(Jb2Arith *arith)
+{
+    int next;
+    if (arith->previous == 0xFF) {
+        next = (arith->position < arith->size) ? arith->data[arith->position] : -1;
+        if (next < 0 || next > 0x8F) {
+            /* A terminating marker: keep feeding ones without consuming it. */
+            arith->bits_left = 8;
+            return;
+        }
+        arith->position++;
+        arith->code += 0xFE00u - ((uint32_t)next << 9);
+        arith->bits_left = 7;
+        arith->previous = next;
+        return;
+    }
+    next = jb2_arith_read_byte(arith);
+    if (next < 0) {
+        arith->code += 0xFF00u;
+        arith->bits_left = 8;
+        arith->previous = 0xFF;
+        return;
+    }
+    arith->code += 0xFF00u - ((uint32_t)next << 8);
+    arith->bits_left = 8;
+    arith->previous = next;
+}
+
+static void jb2_arith_renorm(Jb2Arith *arith)
+{
+    do {
+        if (arith->bits_left == 0) jb2_arith_byte_in(arith);
+        arith->interval = (uint16_t)(arith->interval << 1);
+        arith->code <<= 1;
+        arith->bits_left--;
+    } while ((arith->interval & 0x8000u) == 0u);
+}
+
+static int jb2_arith_decode(Jb2Arith *arith, uint8_t *context)
+{
+    unsigned index = (unsigned)(*context & 0x7Fu);
+    unsigned mps = (unsigned)(*context >> 7);
+    uint16_t qe = jb2_arith_qe[index];
+    unsigned decision;
+    arith->interval = (uint16_t)(arith->interval - qe);
+    if ((arith->code >> 16) < arith->interval) {
+        if (arith->interval & 0x8000u) return (int)mps;
+        if (arith->interval < qe) {
+            decision = 1u - mps;
+            if (jb2_arith_switch[index]) mps ^= 1u;
+            index = jb2_arith_nlps[index];
+        } else {
+            decision = mps;
+            index = jb2_arith_nmps[index];
+        }
+        jb2_arith_renorm(arith);
+        *context = (uint8_t)(index | (mps << 7));
+        return (int)decision;
+    }
+    arith->code -= (uint32_t)arith->interval << 16;
+    if (arith->interval < qe) {
+        arith->interval = qe;
+        decision = mps;
+        index = jb2_arith_nmps[index];
+    } else {
+        arith->interval = qe;
+        decision = 1u - mps;
+        if (jb2_arith_switch[index]) mps ^= 1u;
+        index = jb2_arith_nlps[index];
+    }
+    jb2_arith_renorm(arith);
+    *context = (uint8_t)(index | (mps << 7));
+    return (int)decision;
+}
+
+/* Decode a generic region whose pixels are arithmetic coded with template 0. */
+static int jb2_decode_arithmetic_region(const uint8_t *data, size_t size,
+                                        uint32_t width, uint32_t height,
+                                        Jb2Bitmap *out)
+{
+    Jb2Arith arith;
+    uint8_t *contexts;
+    int at[4][2];
+    int index;
+    uint32_t y;
+    uint32_t x;
+    int first;
+    if (!jb2_bitmap_init(out, width, height, 0)) return 0;
+    contexts = (uint8_t *)calloc(65536u, 1u);
+    if (!contexts) {
+        jb2_bitmap_free(out);
+        return 0;
+    }
+    for (index = 0; index < 4; ++index) {
+        at[index][0] = (int)(int8_t)data[18u + (unsigned)index * 2u];
+        at[index][1] = (int)(int8_t)data[19u + (unsigned)index * 2u];
+    }
+    memset(&arith, 0, sizeof(arith));
+    arith.data = data + 26u;
+    arith.size = size - 26u;
+    first = (arith.size > 0u) ? arith.data[0] : 0;
+    arith.previous = first;
+    arith.position = 1u;
+    arith.interval = 0x8000u;
+    arith.code = ((uint32_t)(~first) & 0xFFu) << 16;
+    jb2_arith_byte_in(&arith);
+    arith.code <<= 7;
+    arith.bits_left -= 7;
+    arith.interval = 0x8000u;
+
+    for (y = 0u; y < height; ++y) {
+        unsigned out_byte = 0u;
+        uint32_t previous_row = 0u;
+        uint32_t previous_row2 = 0u;
+        size_t row_index = 0u;
+        size_t row_index2 = 0u;
+        if (y >= 1u) {
+            previous_row = (uint32_t)out->bits[(size_t)(y - 1u) * out->stride] << 8;
+            if (out->stride > 1u) {
+                previous_row |= out->bits[(size_t)(y - 1u) * out->stride + 1u];
+            }
+            row_index = 2u;
+        }
+        if (y >= 2u) {
+            previous_row2 = ((uint32_t)out->bits[(size_t)(y - 2u) * out->stride] << 8) |
+                            (uint32_t)((out->stride > 1u) ? out->bits[(size_t)(y - 2u) * out->stride + 1u] : 0u);
+            row_index2 = 2u;
+        }
+        for (x = 0u; x < width; ++x) {
+            unsigned context = out_byte & 0x0Fu;
+            context |= (unsigned)jb2_get(out, (int32_t)x + at[0][0], (int32_t)y + at[0][1]) << 4;
+            context |= (previous_row >> 8) & 0x03E0u;
+            context |= (unsigned)jb2_get(out, (int32_t)x + at[1][0], (int32_t)y + at[1][1]) << 10;
+            context |= (unsigned)jb2_get(out, (int32_t)x + at[2][0], (int32_t)y + at[2][1]) << 11;
+            context |= (previous_row2 >> 2) & 0x7000u;
+            context |= (unsigned)jb2_get(out, (int32_t)x + at[3][0], (int32_t)y + at[3][1]) << 15;
+            {
+                int bit = jb2_arith_decode(&arith, &contexts[context]);
+                if (bit) jb2_set(out, x, y, 1);
+                previous_row <<= 1;
+                previous_row2 <<= 1;
+                out_byte = ((out_byte << 1) | (unsigned)bit) & 0xFFu;
+            }
+            if ((x & 7u) == 7u) {
+                if (y >= 1u && x + 9u < width) {
+                    if (row_index < out->stride) {
+                        previous_row |= out->bits[(size_t)(y - 1u) * out->stride + row_index];
+                    }
+                    row_index++;
+                    if (y >= 2u && row_index2 < out->stride) {
+                        previous_row2 |= out->bits[(size_t)(y - 2u) * out->stride + row_index2];
+                    }
+                    row_index2++;
+                }
+            }
+        }
+    }
+    free(contexts);
+    return 1;
+}
 /* Decode one generic region segment body. The body starts with the region
  * segment information, then the generic region flags, optional adaptive
  * template pixels and the coded data. */
@@ -138,8 +347,10 @@ static int jb2_decode_generic_region(const uint8_t *data, size_t size, Jb2Bitmap
     (void)template_id;
     offset = 18u;
     if (!mmr) {
-        /* Arithmetic coding is not implemented yet. */
-        return QW_STATUS_ERR_UNSUPPORTED;
+        if (size < 26u) return 0;
+        if (template_id != 0) return QW_STATUS_ERR_UNSUPPORTED;
+        if (!jb2_decode_arithmetic_region(data, size, width, height, out)) return 0;
+        return 1;
     }
     /* MMR coding carries no adaptive template pixels; the region data is a
      * plain ITU-T T.6 stream with one row per region row. */
@@ -241,6 +452,16 @@ int pdf_jbig2_decode_image(const uint8_t *globals, size_t globals_size,
 
     if (!data || !size || !out_gray8) return 0;
     memset(&page, 0, sizeof(page));
+    /* Some producers embed the standalone file header; the segment stream
+     * starts after it (D.4). */
+    if (size >= 9u && data[0] == 0x97u && data[1] == 0x4Au && data[2] == 0x42u &&
+        data[3] == 0x32u && data[4] == 0x0Du && data[5] == 0x0Au && data[6] == 0x1Au &&
+        data[7] == 0x0Au) {
+        size_t header = (data[8] & 0x02u) ? 9u : 13u;
+        if (size < header) return 0;
+        data += header;
+        size -= header;
+    }
 
     for (;;) {
         int next = jb2_next_segment(data, size, &offset, &number, &type, &page_number,
