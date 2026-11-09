@@ -63,6 +63,13 @@ endif()
 
 include(CTest)
 if(BUILD_TESTING)
+    add_executable(quirewise_document_pdf_jbig2_symbol_render_test
+        tests/pdf_jbig2_symbol_render_test.c)
+    target_compile_features(quirewise_document_pdf_jbig2_symbol_render_test PRIVATE c_std_11)
+    target_link_libraries(quirewise_document_pdf_jbig2_symbol_render_test PRIVATE
+        quirewise_document)
+    add_test(NAME quirewise_document_pdf_jbig2_symbol_render
+        COMMAND quirewise_document_pdf_jbig2_symbol_render_test)
     add_executable(quirewise_document_pdf_jbig2_arith_render_test
         tests/pdf_jbig2_arith_render_test.c)
     target_compile_features(quirewise_document_pdf_jbig2_arith_render_test PRIVATE c_std_11)

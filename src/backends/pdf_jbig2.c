@@ -1,11 +1,16 @@
 /* JBIG2 decoding for PDF image XObjects.
  *
  * PDF carries JBIG2 as a segment stream: page information, region segments and
- * end markers. The decoder here supports the path that scanned documents use
- * for entire pages, generic regions coded with MMR (ITU-T T.6), and composes
- * them onto the page bitmap. Arithmetic-coded generic regions, symbol
- * dictionaries, text regions and halftones report QW_STATUS_ERR_UNSUPPORTED
- * rather than producing a partial page. */
+ * end markers. This decoder implements the path scanned documents use:
+ *
+ *  - generic regions coded with MMR (ITU-T T.6) or with the T.88 arithmetic
+ *    coder, generic templates 0-3;
+ *  - symbol dictionaries that build glyphs from arithmetic-coded generic
+ *    bitmaps and export a subset of them;
+ *  - text regions that place those glyphs on a strip.
+ *
+ * Huffman-coded dictionaries, refinement, halftones and pattern dictionaries
+ * report QW_STATUS_ERR_UNSUPPORTED rather than producing a partial page. */
 
 #include "document_backend.h"
 
@@ -16,6 +21,9 @@
 #define JB2_MAX_PIXELS ((size_t)100u * 1000u * 1000u)
 #define JB2_MAX_DIMENSION 20000u
 #define JB2_MAX_SEGMENTS 4096u
+#define JB2_MAX_SYMBOLS 65536u
+#define JB2_MAX_DICTIONARIES 64u
+#define JB2_MAX_INSTANCES 1000000u
 
 typedef struct Jb2Bitmap {
     uint8_t *bits; /* packed 1-bit rows, 1 = black */
@@ -23,6 +31,16 @@ typedef struct Jb2Bitmap {
     uint32_t height;
     size_t stride;
 } Jb2Bitmap;
+
+typedef struct Jb2Symbols {
+    Jb2Bitmap *glyphs;
+    size_t count;
+} Jb2Symbols;
+
+typedef struct Jb2Dictionary {
+    uint32_t segment;
+    Jb2Symbols symbols;
+} Jb2Dictionary;
 
 static uint32_t jb2_read_u32(const uint8_t *p)
 {
@@ -81,8 +99,8 @@ static void jb2_set(Jb2Bitmap *bitmap, uint32_t x, uint32_t y, int black)
     }
 }
 
-/* Compose a region bitmap onto the page with the segment's combination
- * operator (T.88 7.4.1: 0 OR, 1 AND, 2 XOR, 3 XNOR, 4 REPLACE). */
+/* Compose a region bitmap onto the page with a combination operator
+ * (T.88 7.4.1: 0 OR, 1 AND, 2 XOR, 3 XNOR, 4 REPLACE). */
 static int jb2_compose(Jb2Bitmap *page, const Jb2Bitmap *region, int32_t x0, int32_t y0,
                        unsigned op)
 {
@@ -239,7 +257,203 @@ static int jb2_arith_decode(Jb2Arith *arith, uint8_t *context)
     return (int)decision;
 }
 
-/* Decode a generic region whose pixels are arithmetic coded with template 0. */
+static void jb2_arith_init(Jb2Arith *arith, const uint8_t *data, size_t size)
+{
+    int first;
+    memset(arith, 0, sizeof(*arith));
+    arith->data = data;
+    arith->size = size;
+    first = (size > 0u) ? data[0] : 0;
+    arith->previous = first;
+    arith->position = 1u;
+    arith->interval = 0x8000u;
+    arith->code = ((uint32_t)(~first) & 0xFFu) << 16;
+    jb2_arith_byte_in(arith);
+    arith->code <<= 7;
+    arith->bits_left -= 7;
+    arith->interval = 0x8000u;
+}
+
+/* T.88 Annex A arithmetic integer decoder. Returns 0 for a value, 1 for the
+ * out-of-band code that terminates a run, or -1 on a malformed stream. */
+typedef struct Jb2IntCtx {
+    uint8_t contexts[512];
+} Jb2IntCtx;
+
+static int jb2_arith_int_decode(Jb2Arith *arith, Jb2IntCtx *ctx, int32_t *value)
+{
+    int previous = 1;
+    int s;
+    int bit;
+    int32_t result = 0;
+    int n_tail;
+    int offset;
+    int index;
+    s = jb2_arith_decode(arith, &ctx->contexts[previous]);
+    previous = (previous << 1) | s;
+    bit = jb2_arith_decode(arith, &ctx->contexts[previous]);
+    previous = (previous << 1) | bit;
+    if (bit) {
+        bit = jb2_arith_decode(arith, &ctx->contexts[previous]);
+        previous = (previous << 1) | bit;
+        if (bit) {
+            bit = jb2_arith_decode(arith, &ctx->contexts[previous]);
+            previous = (previous << 1) | bit;
+            if (bit) {
+                bit = jb2_arith_decode(arith, &ctx->contexts[previous]);
+                previous = (previous << 1) | bit;
+                if (bit) {
+                    bit = jb2_arith_decode(arith, &ctx->contexts[previous]);
+                    previous = (previous << 1) | bit;
+                    if (bit) {
+                        n_tail = 32;
+                        offset = 4436;
+                    } else {
+                        n_tail = 12;
+                        offset = 340;
+                    }
+                } else {
+                    n_tail = 8;
+                    offset = 84;
+                }
+            } else {
+                n_tail = 6;
+                offset = 20;
+            }
+        } else {
+            n_tail = 4;
+            offset = 4;
+        }
+    } else {
+        n_tail = 2;
+        offset = 0;
+    }
+    for (index = 0; index < n_tail; ++index) {
+        bit = jb2_arith_decode(arith, &ctx->contexts[previous]);
+        previous = ((previous << 1) & 511) | (previous & 256) | bit;
+        if (result > (INT32_MAX >> 1)) {
+            result = INT32_MAX;
+        } else {
+            result = (result << 1) | bit;
+        }
+    }
+    if (result > INT32_MAX - offset) {
+        result = INT32_MAX;
+    } else {
+        result += offset;
+    }
+    *value = s ? -result : result;
+    return (s && result == 0) ? 1 : 0;
+}
+
+/* T.88 Annex A symbol ID decoder: a fixed-width arithmetic integer. */
+typedef struct Jb2IaidCtx {
+    uint8_t *contexts;
+    uint32_t length;
+} Jb2IaidCtx;
+
+static int jb2_iaid_decode(Jb2Arith *arith, Jb2IaidCtx *ctx, uint32_t *value)
+{
+    uint32_t previous = 1u;
+    uint32_t index;
+    for (index = 0u; index < ctx->length; ++index) {
+        int bit = jb2_arith_decode(arith, &ctx->contexts[previous]);
+        previous = (previous << 1) | (uint32_t)bit;
+    }
+    *value = previous - (1u << ctx->length);
+    return 0;
+}
+
+/* Decode an arithmetic-coded generic region into `bitmap` with `template`.
+ * `contexts` must hold 65536 (template 0), 8192 (template 1) or 1024
+ * (templates 2 and 3) entries. */
+static int jb2_decode_generic_bits(Jb2Arith *arith, uint8_t *contexts, unsigned template_id,
+                                   const int at[4][2], uint32_t width, uint32_t height,
+                                   Jb2Bitmap *bitmap)
+{
+    uint32_t y;
+    uint32_t x;
+    for (y = 0u; y < height; ++y) {
+        unsigned out_byte = 0u;
+        uint32_t previous_row = 0u;
+        uint32_t previous_row2 = 0u;
+        size_t row_index = 0u;
+        size_t row_index2 = 0u;
+        if (y >= 1u) {
+            previous_row = (uint32_t)bitmap->bits[(size_t)(y - 1u) * bitmap->stride] << 8;
+            if (bitmap->stride > 1u) {
+                previous_row |= bitmap->bits[(size_t)(y - 1u) * bitmap->stride + 1u];
+            }
+            row_index = 2u;
+        }
+        if (y >= 2u) {
+            previous_row2 = ((uint32_t)bitmap->bits[(size_t)(y - 2u) * bitmap->stride] << 8) |
+                            (uint32_t)((bitmap->stride > 1u) ?
+                                       bitmap->bits[(size_t)(y - 2u) * bitmap->stride + 1u] : 0u);
+            row_index2 = 2u;
+        }
+        for (x = 0u; x < width; ++x) {
+            unsigned context;
+            int bit;
+            switch (template_id) {
+            case 0u:
+                context = out_byte & 0x0Fu;
+                context |= (unsigned)jb2_get(bitmap, (int32_t)x + at[0][0], (int32_t)y + at[0][1]) << 4;
+                context |= (previous_row >> 8) & 0x03E0u;
+                context |= (unsigned)jb2_get(bitmap, (int32_t)x + at[1][0], (int32_t)y + at[1][1]) << 10;
+                context |= (unsigned)jb2_get(bitmap, (int32_t)x + at[2][0], (int32_t)y + at[2][1]) << 11;
+                context |= (previous_row2 >> 2) & 0x7000u;
+                context |= (unsigned)jb2_get(bitmap, (int32_t)x + at[3][0], (int32_t)y + at[3][1]) << 15;
+                break;
+            case 1u:
+                context = out_byte & 0x07u;
+                context |= (unsigned)jb2_get(bitmap, (int32_t)x + at[0][0], (int32_t)y + at[0][1]) << 3;
+                context |= (previous_row >> 9) & 0x01F0u;
+                context |= (previous_row2 >> 4) & 0x1E00u;
+                break;
+            case 2u:
+                context = out_byte & 0x03u;
+                context |= (unsigned)jb2_get(bitmap, (int32_t)x + at[0][0], (int32_t)y + at[0][1]) << 2;
+                context |= (previous_row >> 11) & 0x0078u;
+                context |= (previous_row2 >> 7) & 0x0380u;
+                break;
+            default:
+                context = out_byte & 0x0Fu;
+                context |= (unsigned)jb2_get(bitmap, (int32_t)x + at[0][0], (int32_t)y + at[0][1]) << 4;
+                context |= (previous_row >> 9) & 0x03E0u;
+                break;
+            }
+            bit = jb2_arith_decode(arith, &contexts[context]);
+            if (bit) jb2_set(bitmap, x, y, 1);
+            previous_row <<= 1;
+            previous_row2 <<= 1;
+            out_byte = ((out_byte << 1) | (unsigned)bit) & 0xFFu;
+            if ((x & 7u) == 7u) {
+                if (y >= 1u && x + 9u < width) {
+                    if (row_index < bitmap->stride) {
+                        previous_row |= bitmap->bits[(size_t)(y - 1u) * bitmap->stride + row_index];
+                    }
+                    row_index++;
+                    if (y >= 2u && row_index2 < bitmap->stride) {
+                        previous_row2 |= bitmap->bits[(size_t)(y - 2u) * bitmap->stride + row_index2];
+                    }
+                    row_index2++;
+                }
+            }
+        }
+    }
+    return 1;
+}
+
+static size_t jb2_context_count(unsigned template_id)
+{
+    if (template_id == 0u) return 65536u;
+    if (template_id == 1u) return 8192u;
+    return 1024u;
+}
+
+/* Decode one arithmetic-coded generic region segment body (region information,
+ * generic flags, adaptive template pixels, coded data). */
 static int jb2_decode_arithmetic_region(const uint8_t *data, size_t size,
                                         uint32_t width, uint32_t height,
                                         Jb2Bitmap *out)
@@ -248,92 +462,46 @@ static int jb2_decode_arithmetic_region(const uint8_t *data, size_t size,
     uint8_t *contexts;
     int at[4][2];
     int index;
-    uint32_t y;
-    uint32_t x;
-    int first;
+    unsigned template_id = 0u;
+    unsigned flags;
+    if (size < 18u) return 0;
+    flags = data[17u];
+    template_id = (flags >> 1) & 0x03u;
+    for (index = 0; index < 4; ++index) {
+        at[index][0] = 0;
+        at[index][1] = 0;
+    }
+    if (template_id == 0u) {
+        if (size < 26u) return 0;
+        for (index = 0; index < 4; ++index) {
+            at[index][0] = (int)(int8_t)data[18u + (unsigned)index * 2u];
+            at[index][1] = (int)(int8_t)data[19u + (unsigned)index * 2u];
+        }
+    } else {
+        if (size < 20u) return 0;
+        at[0][0] = (int)(int8_t)data[18u];
+        at[0][1] = (int)(int8_t)data[19u];
+    }
     if (!jb2_bitmap_init(out, width, height, 0)) return 0;
-    contexts = (uint8_t *)calloc(65536u, 1u);
+    contexts = (uint8_t *)calloc(jb2_context_count(template_id), 1u);
     if (!contexts) {
         jb2_bitmap_free(out);
         return 0;
     }
-    for (index = 0; index < 4; ++index) {
-        at[index][0] = (int)(int8_t)data[18u + (unsigned)index * 2u];
-        at[index][1] = (int)(int8_t)data[19u + (unsigned)index * 2u];
-    }
-    memset(&arith, 0, sizeof(arith));
-    arith.data = data + 26u;
-    arith.size = size - 26u;
-    first = (arith.size > 0u) ? arith.data[0] : 0;
-    arith.previous = first;
-    arith.position = 1u;
-    arith.interval = 0x8000u;
-    arith.code = ((uint32_t)(~first) & 0xFFu) << 16;
-    jb2_arith_byte_in(&arith);
-    arith.code <<= 7;
-    arith.bits_left -= 7;
-    arith.interval = 0x8000u;
-
-    for (y = 0u; y < height; ++y) {
-        unsigned out_byte = 0u;
-        uint32_t previous_row = 0u;
-        uint32_t previous_row2 = 0u;
-        size_t row_index = 0u;
-        size_t row_index2 = 0u;
-        if (y >= 1u) {
-            previous_row = (uint32_t)out->bits[(size_t)(y - 1u) * out->stride] << 8;
-            if (out->stride > 1u) {
-                previous_row |= out->bits[(size_t)(y - 1u) * out->stride + 1u];
-            }
-            row_index = 2u;
-        }
-        if (y >= 2u) {
-            previous_row2 = ((uint32_t)out->bits[(size_t)(y - 2u) * out->stride] << 8) |
-                            (uint32_t)((out->stride > 1u) ? out->bits[(size_t)(y - 2u) * out->stride + 1u] : 0u);
-            row_index2 = 2u;
-        }
-        for (x = 0u; x < width; ++x) {
-            unsigned context = out_byte & 0x0Fu;
-            context |= (unsigned)jb2_get(out, (int32_t)x + at[0][0], (int32_t)y + at[0][1]) << 4;
-            context |= (previous_row >> 8) & 0x03E0u;
-            context |= (unsigned)jb2_get(out, (int32_t)x + at[1][0], (int32_t)y + at[1][1]) << 10;
-            context |= (unsigned)jb2_get(out, (int32_t)x + at[2][0], (int32_t)y + at[2][1]) << 11;
-            context |= (previous_row2 >> 2) & 0x7000u;
-            context |= (unsigned)jb2_get(out, (int32_t)x + at[3][0], (int32_t)y + at[3][1]) << 15;
-            {
-                int bit = jb2_arith_decode(&arith, &contexts[context]);
-                if (bit) jb2_set(out, x, y, 1);
-                previous_row <<= 1;
-                previous_row2 <<= 1;
-                out_byte = ((out_byte << 1) | (unsigned)bit) & 0xFFu;
-            }
-            if ((x & 7u) == 7u) {
-                if (y >= 1u && x + 9u < width) {
-                    if (row_index < out->stride) {
-                        previous_row |= out->bits[(size_t)(y - 1u) * out->stride + row_index];
-                    }
-                    row_index++;
-                    if (y >= 2u && row_index2 < out->stride) {
-                        previous_row2 |= out->bits[(size_t)(y - 2u) * out->stride + row_index2];
-                    }
-                    row_index2++;
-                }
-            }
-        }
-    }
+    jb2_arith_init(&arith, data + (template_id == 0u ? 26u : 20u),
+                   size - (template_id == 0u ? 26u : 20u));
+    jb2_decode_generic_bits(&arith, contexts, template_id, at, width, height, out);
     free(contexts);
     return 1;
 }
-/* Decode one generic region segment body. The body starts with the region
- * segment information, then the generic region flags, optional adaptive
- * template pixels and the coded data. */
+
+/* Decode one generic region segment body (MMR or arithmetic). */
 static int jb2_decode_generic_region(const uint8_t *data, size_t size, Jb2Bitmap *out)
 {
     uint32_t width;
     uint32_t height;
     unsigned flags;
     int mmr;
-    int template_id;
     size_t offset = 17u;
     if (!data || size < 18u || !out) return 0;
     width = jb2_read_u32(data);
@@ -343,12 +511,8 @@ static int jb2_decode_generic_region(const uint8_t *data, size_t size, Jb2Bitmap
     }
     flags = data[17u];
     mmr = (flags & 0x01u) != 0u;
-    template_id = (int)((flags >> 1) & 0x03u);
-    (void)template_id;
     offset = 18u;
     if (!mmr) {
-        if (size < 26u) return 0;
-        if (template_id != 0) return QW_STATUS_ERR_UNSUPPORTED;
         /* Typical prediction would skip decoded rows; ignoring it silently
          * corrupts the region, so refuse it instead. */
         if (flags & 0x08u) return QW_STATUS_ERR_UNSUPPORTED;
@@ -380,15 +544,344 @@ static int jb2_decode_generic_region(const uint8_t *data, size_t size, Jb2Bitmap
     return 1;
 }
 
+/* Decode a symbol dictionary segment body into its exported glyphs. */
+static int jb2_decode_symbol_dict(const uint8_t *data, size_t size, Jb2Symbols *out)
+{
+    uint16_t flags;
+    unsigned sd_huff;
+    unsigned sd_refagg;
+    unsigned template_id;
+    unsigned sd_rtemplate;
+    size_t offset;
+    uint32_t export_count;
+    uint32_t new_count;
+    Jb2Bitmap *new_symbols = NULL;
+    uint32_t decoded = 0u;
+    Jb2Arith arith;
+    uint8_t *contexts = NULL;
+    Jb2IntCtx *iadh = NULL;
+    Jb2IntCtx *iadw = NULL;
+    Jb2IntCtx *iaex = NULL;
+    int32_t height_class = 0;
+    int status = 0;
+    int at[4][2];
+    int index;
+    if (!data || size < 10u || !out) return 0;
+    flags = (uint16_t)((data[0] << 8) | data[1]);
+    sd_huff = flags & 0x01u;
+    sd_refagg = (flags >> 1) & 0x01u;
+    template_id = (flags >> 10) & 0x03u;
+    sd_rtemplate = (flags >> 12) & 0x01u;
+    if (sd_huff || sd_refagg || sd_rtemplate) return QW_STATUS_ERR_UNSUPPORTED;
+    if (template_id > 3u) return QW_STATUS_ERR_UNSUPPORTED;
+    offset = 2u;
+    {
+        size_t at_bytes = (template_id == 0u) ? 8u : 2u;
+        if (size - offset < at_bytes) return 0;
+        for (index = 0; index < 4; ++index) {
+            at[index][0] = 0;
+            at[index][1] = 0;
+        }
+        if (template_id == 0u) {
+            for (index = 0; index < 4; ++index) {
+                at[index][0] = (int)(int8_t)data[offset + (size_t)index * 2u];
+                at[index][1] = (int)(int8_t)data[offset + (size_t)index * 2u + 1u];
+            }
+        } else {
+            at[0][0] = (int)(int8_t)data[offset];
+            at[0][1] = (int)(int8_t)data[offset + 1u];
+        }
+        offset += at_bytes;
+    }
+    if (size - offset < 8u) return 0;
+    export_count = jb2_read_u32(data + offset);
+    new_count = jb2_read_u32(data + offset + 4u);
+    offset += 8u;
+    if (new_count > JB2_MAX_SYMBOLS || export_count > JB2_MAX_SYMBOLS) return 0;
+    new_symbols = (Jb2Bitmap *)calloc(new_count ? new_count : 1u, sizeof(Jb2Bitmap));
+    contexts = (uint8_t *)calloc(jb2_context_count(template_id), 1u);
+    iadh = (Jb2IntCtx *)calloc(1u, sizeof(Jb2IntCtx));
+    iadw = (Jb2IntCtx *)calloc(1u, sizeof(Jb2IntCtx));
+    iaex = (Jb2IntCtx *)calloc(1u, sizeof(Jb2IntCtx));
+    if (!contexts || !iadh || !iadw || !iaex) goto cleanup;
+    jb2_arith_init(&arith, data + offset, size - offset);
+    while (decoded < new_count) {
+        int32_t delta;
+        int code = jb2_arith_int_decode(&arith, iadh, &delta);
+        uint32_t symbol_width = 0u;
+        if (code != 0) {
+            status = 0;
+            goto cleanup;
+        }
+        height_class += delta;
+        if (height_class <= 0) {
+            status = 0;
+            goto cleanup;
+        }
+        for (;;) {
+            int32_t dw;
+            code = jb2_arith_int_decode(&arith, iadw, &dw);
+            if (code == 1) break; /* end of height class */
+            if (code != 0) {
+                status = 0;
+                goto cleanup;
+            }
+            if (dw < 0 && symbol_width < (uint32_t)(-dw)) {
+                status = 0;
+                goto cleanup;
+            }
+            symbol_width += (uint32_t)dw;
+            if (!symbol_width || symbol_width > JB2_MAX_DIMENSION) {
+                status = 0;
+                goto cleanup;
+            }
+            if (decoded >= new_count) break;
+            if (!jb2_bitmap_init(&new_symbols[decoded], symbol_width,
+                                 (uint32_t)height_class, 0)) {
+                status = 0;
+                goto cleanup;
+            }
+            jb2_decode_generic_bits(&arith, contexts, template_id, at, symbol_width,
+                                    (uint32_t)height_class, &new_symbols[decoded]);
+            decoded++;
+        }
+    }
+    /* Export flags are arithmetic-coded run lengths of alternately skipped and
+     * exported symbols; see T.88 6.5.10. */
+    out->glyphs = (Jb2Bitmap *)calloc(export_count ? export_count : 1u, sizeof(Jb2Bitmap));
+    if (!out->glyphs) {
+        status = 0;
+        goto cleanup;
+    }
+    {
+        uint32_t position = 0u;
+        uint32_t exported = 0u;
+        int is_export = 0;
+        while (position < new_count && exported < export_count) {
+            int32_t run;
+            uint32_t step;
+            int code = jb2_arith_int_decode(&arith, iaex, &run);
+            if (code == 1) break;
+            if (code != 0) {
+                status = 0;
+                goto cleanup;
+            }
+            if (run < 0) {
+                step = (uint32_t)(-run);
+                if (step > new_count - position) step = new_count - position;
+                position += step;
+            } else {
+                uint32_t index2;
+                if ((uint32_t)run > new_count - position) run = (int32_t)(new_count - position);
+                for (index2 = 0u; index2 < (uint32_t)run; ++index2) {
+                    if (is_export && exported < export_count) {
+                        out->glyphs[exported].bits = new_symbols[position].bits;
+                        out->glyphs[exported].width = new_symbols[position].width;
+                        out->glyphs[exported].height = new_symbols[position].height;
+                        out->glyphs[exported].stride = new_symbols[position].stride;
+                        new_symbols[position].bits = NULL;
+                        exported++;
+                    }
+                    position++;
+                }
+            }
+            is_export = !is_export;
+        }
+        out->count = exported;
+    }
+    status = 1;
+
+cleanup:
+    if (new_symbols) {
+        uint32_t index3;
+        for (index3 = 0u; index3 < new_count; ++index3) {
+            jb2_bitmap_free(&new_symbols[index3]);
+        }
+        free(new_symbols);
+    }
+    if (status != 1 && out->glyphs) {
+        uint32_t index4;
+        for (index4 = 0u; index4 < out->count; ++index4) {
+            jb2_bitmap_free(&out->glyphs[index4]);
+        }
+        free(out->glyphs);
+        out->glyphs = NULL;
+        out->count = 0u;
+    }
+    free(contexts);
+    free(iadh);
+    free(iadw);
+    free(iaex);
+    return status;
+}
+
+/* Decode a text region segment body into a region bitmap. */
+static int jb2_decode_text_region(const uint8_t *data, size_t size,
+                                  const Jb2Symbols *const *dictionaries,
+                                  size_t dictionary_count, Jb2Bitmap *out)
+{
+    uint32_t width;
+    uint32_t height;
+    uint16_t flags;
+    unsigned sb_huff;
+    unsigned sb_refine;
+    unsigned strips_log;
+    unsigned refcorner;
+    unsigned transposed;
+    unsigned combine_op;
+    int32_t strip_offset;
+    uint32_t instances;
+    size_t offset;
+    size_t symbol_count = 0u;
+    size_t index;
+    uint32_t code_length;
+    Jb2Arith arith;
+    Jb2IntCtx *iadt = NULL;
+    Jb2IntCtx *iafs = NULL;
+    Jb2IntCtx *iads = NULL;
+    Jb2IntCtx *iait = NULL;
+    Jb2IaidCtx iaid;
+    int status = 0;
+    int32_t strip_t;
+    int32_t first_s = 0;
+    int32_t cursor_s = 0;
+    uint32_t placed = 0u;
+    if (!data || size < 19u || !out) return 0;
+    width = jb2_read_u32(data);
+    height = jb2_read_u32(data + 4u);
+    if (!width || !height || width > JB2_MAX_DIMENSION || height > JB2_MAX_DIMENSION) {
+        return 0;
+    }
+    flags = (uint16_t)((data[17u] << 8) | data[18u]);
+    sb_huff = flags & 0x01u;
+    sb_refine = (flags >> 1) & 0x01u;
+    strips_log = (flags >> 2) & 0x03u;
+    refcorner = (flags >> 4) & 0x03u;
+    transposed = (flags >> 6) & 0x01u;
+    combine_op = (flags >> 7) & 0x03u;
+    strip_offset = (int32_t)((flags >> 10) & 0x1Fu);
+    if (strip_offset > 0x0F) strip_offset -= 0x20;
+    if (sb_huff || sb_refine || transposed) return QW_STATUS_ERR_UNSUPPORTED;
+    offset = 19u;
+    if (size - offset < 4u) return 0;
+    instances = jb2_read_u32(data + offset);
+    offset += 4u;
+    if (instances > JB2_MAX_INSTANCES) return 0;
+    for (index = 0u; index < dictionary_count; ++index) {
+        symbol_count += dictionaries[index]->count;
+    }
+    code_length = 0u;
+    while ((1u << code_length) < symbol_count) ++code_length;
+    if (code_length > 16u) return 0;
+    if (!jb2_bitmap_init(out, width, height, 0)) return 0;
+    iadt = (Jb2IntCtx *)calloc(1u, sizeof(Jb2IntCtx));
+    iafs = (Jb2IntCtx *)calloc(1u, sizeof(Jb2IntCtx));
+    iads = (Jb2IntCtx *)calloc(1u, sizeof(Jb2IntCtx));
+    iait = (Jb2IntCtx *)calloc(1u, sizeof(Jb2IntCtx));
+    memset(&iaid, 0, sizeof(iaid));
+    iaid.length = code_length;
+    iaid.contexts = (uint8_t *)calloc((size_t)1u << (code_length + 1u), 1u);
+    if (!iadt || !iafs || !iads || !iait || !iaid.contexts) goto cleanup;
+    jb2_arith_init(&arith, data + offset, size - offset);
+    {
+        int32_t strip_value;
+        int code = jb2_arith_int_decode(&arith, iadt, &strip_value);
+        if (code != 0) goto cleanup;
+        strip_t = -strip_value * (int32_t)(1u << strips_log);
+    }
+    while (placed < instances) {
+        int32_t delta_t;
+        int code = jb2_arith_int_decode(&arith, iadt, &delta_t);
+        int first_symbol = 1;
+        if (code != 0) goto cleanup;
+        strip_t += delta_t * (int32_t)(1u << strips_log);
+        for (;;) {
+            int32_t cur_t = 0;
+            uint32_t symbol_id;
+            const Jb2Bitmap *glyph = NULL;
+            int32_t x;
+            int32_t y;
+            if (first_symbol) {
+                int32_t dfs;
+                code = jb2_arith_int_decode(&arith, iafs, &dfs);
+                if (code != 0) goto cleanup;
+                first_s += dfs;
+                cursor_s = first_s;
+                first_symbol = 0;
+            } else {
+                int32_t ids;
+                code = jb2_arith_int_decode(&arith, iads, &ids);
+                if (code == 1) break; /* end of strip */
+                if (code != 0) goto cleanup;
+                cursor_s += ids + strip_offset;
+            }
+            if (strips_log > 0u) {
+                int32_t value;
+                code = jb2_arith_int_decode(&arith, iait, &value);
+                if (code != 0) goto cleanup;
+                cur_t = value;
+            }
+            if (jb2_iaid_decode(&arith, &iaid, &symbol_id) != 0) goto cleanup;
+            {
+                size_t remaining = symbol_id;
+                size_t dictionary_index = 0u;
+                while (dictionary_index < dictionary_count &&
+                       remaining >= dictionaries[dictionary_index]->count) {
+                    remaining -= dictionaries[dictionary_index]->count;
+                    dictionary_index++;
+                }
+                if (dictionary_index < dictionary_count &&
+                    remaining < dictionaries[dictionary_index]->count) {
+                    glyph = &dictionaries[dictionary_index]->glyphs[remaining];
+                }
+            }
+            if (!glyph) {
+                placed++;
+                if (placed >= instances) break;
+                continue;
+            }
+            /* T.88 6.4.10: the reference corner anchors the glyph; the strip
+             * coordinate counts from the bottom of the region. */
+            if (refcorner < 2u) {
+                y = strip_t + cur_t - (int32_t)glyph->height + 1;
+                x = (refcorner == 0u) ? cursor_s
+                                      : cursor_s - (int32_t)glyph->width + 1;
+            } else {
+                y = strip_t + cur_t;
+                x = (refcorner == 2u) ? cursor_s
+                                      : cursor_s - (int32_t)glyph->width + 1;
+            }
+            jb2_compose(out, glyph, x, y, combine_op);
+            if (refcorner < 2u) {
+                cursor_s += (int32_t)glyph->width - 1;
+            }
+            placed++;
+            if (placed >= instances) break;
+        }
+    }
+    status = 1;
+
+cleanup:
+    free(iadt);
+    free(iafs);
+    free(iads);
+    free(iait);
+    free(iaid.contexts);
+    if (status != 1) jb2_bitmap_free(out);
+    return status;
+}
+
 /* Parse the header of the next segment. Returns 1 with the fields filled in,
  * 0 at end of data, or -1 on a malformed header. */
 static int jb2_next_segment(const uint8_t *data, size_t size, size_t *offset,
                             uint32_t *number, unsigned *type, uint32_t *page,
-                            size_t *body_offset, size_t *body_size)
+                            size_t *body_offset, size_t *body_size,
+                            uint32_t *referred, size_t referred_capacity,
+                            size_t *referred_count)
 {
     size_t position = *offset;
     uint8_t flags;
-    uint32_t referred_count = 0u;
+    uint32_t count = 0u;
     uint32_t referred_size;
     size_t index;
     if (position >= size) return 0;
@@ -405,18 +898,32 @@ static int jb2_next_segment(const uint8_t *data, size_t size, size_t *offset,
             uint32_t long_form;
             if (size - position < 3u) return -1;
             long_form = jb2_read_u32(data + position - 1u);
-            referred_count = long_form & 0x1fffffffu;
+            count = long_form & 0x1fffffffu;
             position += 3u;
-            position += ((size_t)referred_count + 1u) / 8u;
+            position += ((size_t)count + 1u) / 8u;
         } else {
-            referred_count = (uint32_t)(rtscarf >> 5);
+            count = (uint32_t)(rtscarf >> 5);
         }
     }
     referred_size = (*number <= 256u) ? 1u : (*number <= 65536u) ? 2u : 4u;
-    if (referred_count > 0u && (size_t)referred_count > size) return -1;
-    for (index = 0u; index < referred_count; ++index) {
+    if (count > 0u && (size_t)count > size) return -1;
+    for (index = 0u; index < count; ++index) {
+        uint32_t value;
         if (size - position < referred_size) return -1;
+        if (referred && index < referred_capacity) {
+            if (referred_size == 1u) {
+                value = data[position];
+            } else if (referred_size == 2u) {
+                value = ((uint32_t)data[position] << 8) | data[position + 1u];
+            } else {
+                value = jb2_read_u32(data + position);
+            }
+            referred[index] = value;
+        }
         position += referred_size;
+    }
+    if (referred_count) {
+        *referred_count = (count < referred_capacity) ? count : referred_capacity;
     }
     if (flags & 0x40u) {
         if (size - position < 4u) return -1;
@@ -450,11 +957,15 @@ int pdf_jbig2_decode_image(const uint8_t *globals, size_t globals_size,
     size_t body_size;
     int have_page = 0;
     int status = 0;
-    (void)globals;
-    (void)globals_size;
+    Jb2Dictionary dictionaries[JB2_MAX_DICTIONARIES];
+    size_t dictionary_count = 0u;
+    size_t pass;
+    (void)width_hint;
+    (void)height_hint;
 
     if (!data || !size || !out_gray8) return 0;
     memset(&page, 0, sizeof(page));
+    memset(dictionaries, 0, sizeof(dictionaries));
     /* Some producers embed the standalone file header; the segment stream
      * starts after it (D.4). */
     if (size >= 9u && data[0] == 0x97u && data[1] == 0x4Au && data[2] == 0x42u &&
@@ -466,74 +977,163 @@ int pdf_jbig2_decode_image(const uint8_t *globals, size_t globals_size,
         size -= header;
     }
 
-    for (;;) {
-        int next = jb2_next_segment(data, size, &offset, &number, &type, &page_number,
-                                    &body_offset, &body_size);
-        const uint8_t *body = data + body_offset;
-        if (next == 0) break;
-        if (next < 0) {
-            status = 0;
+    /* Pass 0 reads the global segments (symbol dictionaries); pass 1 decodes
+     * the page segments, which may refer to those dictionaries. */
+    for (pass = 0u; pass < ((globals && globals_size) ? 2u : 1u); ++pass) {
+        const uint8_t *stream;
+        size_t stream_size;
+        int globals_pass = (globals && globals_size && pass == 0u) ? 1 : 0;
+        size_t position = 0u;
+        if (globals && globals_size) {
+            stream = globals_pass ? globals : data;
+            stream_size = globals_pass ? globals_size : size;
+        } else {
+            stream = data;
+            stream_size = size;
+        }
+        (void)page_number;
+        for (;;) {
+            uint32_t referred[JB2_MAX_DICTIONARIES];
+            size_t referred_count = 0u;
+            int next = jb2_next_segment(stream, stream_size, &position, &number, &type,
+                                        &page_number, &body_offset, &body_size,
+                                        referred, JB2_MAX_DICTIONARIES, &referred_count);
+            const uint8_t *body = stream + body_offset;
+            if (next == 0) break;
+            if (next < 0) {
+                status = 0;
+                goto done;
+            }
+            if (globals_pass) {
+                if (type == 0u && dictionary_count < JB2_MAX_DICTIONARIES) {
+                    Jb2Symbols symbols;
+                    memset(&symbols, 0, sizeof(symbols));
+                    {
+                        int decoded = jb2_decode_symbol_dict(body, body_size, &symbols);
+                        if (decoded == QW_STATUS_ERR_UNSUPPORTED) {
+                            status = QW_STATUS_ERR_UNSUPPORTED;
+                            goto done;
+                        }
+                        if (decoded != 1) {
+                            status = 0;
+                            goto done;
+                        }
+                    }
+                    dictionaries[dictionary_count].segment = number;
+                    dictionaries[dictionary_count].symbols = symbols;
+                    dictionary_count++;
+                }
+                continue;
+            }
+            if (type == 48u) { /* page information */
+                uint32_t width;
+                uint32_t height;
+                unsigned flags;
+                if (body_size < 19u) { status = 0; goto done; }
+                width = jb2_read_u32(body);
+                height = jb2_read_u32(body + 4u);
+                flags = body[16u];
+                if (!width || !height) { status = 0; goto done; }
+                jb2_bitmap_free(&page);
+                if (!jb2_bitmap_init(&page, width, height, (flags & 0x04u) != 0u)) {
+                    status = 0;
+                    goto done;
+                }
+                have_page = 1;
+                continue;
+            }
+            if (type == 49u || type == 50u || type == 51u) continue; /* end markers */
+            if (type == 52u || type == 53u || type == 54u || type == 62u) {
+                continue; /* profiles, custom tables, palettes, comments */
+            }
+            if (!have_page) { status = 0; goto done; }
+            if (type == 38u || type == 39u) {
+                Jb2Bitmap region;
+                int decoded;
+                memset(&region, 0, sizeof(region));
+                decoded = jb2_decode_generic_region(body, body_size, &region);
+                if (decoded == QW_STATUS_ERR_UNSUPPORTED) {
+                    status = QW_STATUS_ERR_UNSUPPORTED;
+                    goto done;
+                }
+                if (decoded != 1) { status = 0; goto done; }
+                if (!jb2_compose(&page, &region, (int32_t)jb2_read_u32(body + 8u),
+                                 (int32_t)jb2_read_u32(body + 12u), body[16u] & 0x07u)) {
+                    jb2_bitmap_free(&region);
+                    status = 0;
+                    goto done;
+                }
+                jb2_bitmap_free(&region);
+                continue;
+            }
+            if (type == 0u) { /* symbol dictionary without a page */
+                if (dictionary_count < JB2_MAX_DICTIONARIES) {
+                    Jb2Symbols symbols;
+                    memset(&symbols, 0, sizeof(symbols));
+                    {
+                        int decoded = jb2_decode_symbol_dict(body, body_size, &symbols);
+                        if (decoded == QW_STATUS_ERR_UNSUPPORTED) {
+                            status = QW_STATUS_ERR_UNSUPPORTED;
+                            goto done;
+                        }
+                        if (decoded != 1) {
+                            status = 0;
+                            goto done;
+                        }
+                    }
+                    dictionaries[dictionary_count].segment = number;
+                    dictionaries[dictionary_count].symbols = symbols;
+                    dictionary_count++;
+                }
+                continue;
+            }
+            if (type == 4u || type == 6u || type == 7u) {
+                Jb2Bitmap region;
+                const Jb2Symbols *active[JB2_MAX_DICTIONARIES];
+                size_t active_count = 0u;
+                size_t index;
+                int decoded;
+                memset(&region, 0, sizeof(region));
+                for (index = 0u; index < referred_count && active_count < JB2_MAX_DICTIONARIES; ++index) {
+                    size_t dictionary_index;
+                    for (dictionary_index = 0u; dictionary_index < dictionary_count; ++dictionary_index) {
+                        if (dictionaries[dictionary_index].segment == referred[index]) {
+                            active[active_count++] = &dictionaries[dictionary_index].symbols;
+                            break;
+                        }
+                    }
+                }
+                if (!active_count) {
+                    for (index = 0u; index < dictionary_count && active_count < JB2_MAX_DICTIONARIES; ++index) {
+                        active[active_count++] = &dictionaries[index].symbols;
+                    }
+                }
+                decoded = jb2_decode_text_region(body, body_size, active, active_count, &region);
+                if (decoded == QW_STATUS_ERR_UNSUPPORTED) {
+                    status = QW_STATUS_ERR_UNSUPPORTED;
+                    goto done;
+                }
+                if (decoded != 1) { status = 0; goto done; }
+                if (!jb2_compose(&page, &region, (int32_t)jb2_read_u32(body + 8u),
+                                 (int32_t)jb2_read_u32(body + 12u), body[16u] & 0x07u)) {
+                    jb2_bitmap_free(&region);
+                    status = 0;
+                    goto done;
+                }
+                jb2_bitmap_free(&region);
+                continue;
+            }
+            /* Halftones, pattern dictionaries and refinement produce content
+             * this decoder cannot compose. */
+            status = QW_STATUS_ERR_UNSUPPORTED;
             goto done;
         }
-        if (type == 48u) { /* page information */
-            uint32_t width;
-            uint32_t height;
-            unsigned flags;
-            if (body_size < 19u) { status = 0; goto done; }
-            width = jb2_read_u32(body);
-            height = jb2_read_u32(body + 4u);
-            flags = body[16u];
-            if (!width || !height) { status = 0; goto done; }
-            jb2_bitmap_free(&page);
-            if (!jb2_bitmap_init(&page, width, height, (flags & 0x04u) != 0u)) {
-                status = 0;
-                goto done;
-            }
-            have_page = 1;
-            continue;
-        }
-        if (type == 49u || type == 50u || type == 51u) continue; /* end markers */
-        if (type == 36u) continue; /* intermediate generic region: never composed */
-        if (type == 52u || type == 53u || type == 62u || type == 54u) {
-            /* Profiles, custom tables, comments and colour palettes do not
-             * change the page bitmap this decoder produces. */
-            continue;
-        }
-        if (!have_page) { status = 0; goto done; }
-        if (type == 38u || type == 39u) {
-            Jb2Bitmap region;
-            int decoded;
-            memset(&region, 0, sizeof(region));
-            decoded = jb2_decode_generic_region(body, body_size, &region);
-            if (decoded == QW_STATUS_ERR_UNSUPPORTED) {
-                status = QW_STATUS_ERR_UNSUPPORTED;
-                goto done;
-            }
-            if (!decoded) { status = 0; goto done; }
-            if (!jb2_compose(&page, &region, (int32_t)jb2_read_u32(body + 8u),
-                             (int32_t)jb2_read_u32(body + 12u), body[16u] & 0x07u)) {
-                jb2_bitmap_free(&region);
-                status = 0;
-                goto done;
-            }
-            jb2_bitmap_free(&region);
-            continue;
-        }
-        /* Symbol dictionaries, text regions, halftones and refinement produce
-         * content this decoder cannot compose, so fail instead of returning a
-         * partially drawn page. */
-        status = QW_STATUS_ERR_UNSUPPORTED;
-        goto done;
     }
 
     if (!have_page) {
         status = 0;
         goto done;
     }
-    /* The PDF dictionary's /Width and /Height only hint at the page size; the
-     * page information segment is authoritative. */
-    (void)width_hint;
-    (void)height_hint;
     {
         uint8_t *gray = (uint8_t *)malloc((size_t)page.width * (size_t)page.height);
         uint32_t y;
@@ -552,6 +1152,16 @@ int pdf_jbig2_decode_image(const uint8_t *globals, size_t globals_size,
     }
 
 done:
+    {
+        size_t index;
+        for (index = 0u; index < dictionary_count; ++index) {
+            size_t glyph;
+            for (glyph = 0u; glyph < dictionaries[index].symbols.count; ++glyph) {
+                jb2_bitmap_free(&dictionaries[index].symbols.glyphs[glyph]);
+            }
+            free(dictionaries[index].symbols.glyphs);
+        }
+    }
     jb2_bitmap_free(&page);
     return status;
 }
