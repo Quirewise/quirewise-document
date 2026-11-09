@@ -269,6 +269,12 @@ int pdf_jbig2_decode_image(const uint8_t *globals, size_t globals_size,
             continue;
         }
         if (type == 49u || type == 50u || type == 51u) continue; /* end markers */
+        if (type == 36u) continue; /* intermediate generic region: never composed */
+        if (type == 52u || type == 53u || type == 62u || type == 54u) {
+            /* Profiles, custom tables, comments and colour palettes do not
+             * change the page bitmap this decoder produces. */
+            continue;
+        }
         if (!have_page) { status = 0; goto done; }
         if (type == 38u || type == 39u) {
             Jb2Bitmap region;
@@ -289,10 +295,6 @@ int pdf_jbig2_decode_image(const uint8_t *globals, size_t globals_size,
             jb2_bitmap_free(&region);
             continue;
         }
-        if (type == 36u) { /* intermediate generic region: not composed */
-            status = QW_STATUS_ERR_UNSUPPORTED;
-            goto done;
-        }
         /* Symbol dictionaries, text regions, halftones and refinement produce
          * content this decoder cannot compose, so fail instead of returning a
          * partially drawn page. */
@@ -304,10 +306,9 @@ int pdf_jbig2_decode_image(const uint8_t *globals, size_t globals_size,
         status = 0;
         goto done;
     }
-    if (width_hint && page.width != width_hint && page.width == 0u) {
-        status = 0;
-        goto done;
-    }
+    /* The PDF dictionary's /Width and /Height only hint at the page size; the
+     * page information segment is authoritative. */
+    (void)width_hint;
     (void)height_hint;
     {
         uint8_t *gray = (uint8_t *)malloc((size_t)page.width * (size_t)page.height);
