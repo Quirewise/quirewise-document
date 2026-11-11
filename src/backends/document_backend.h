@@ -3,6 +3,7 @@
 
 #include "quirewise/convert.h"
 #include "quirewise/document.h"
+#include "quirewise/image.h"
 
 #include <stddef.h>
 #include <stdio.h>
@@ -23,6 +24,10 @@ int qw_doc_convert_memory(const uint8_t *data,
                             uint8_t **out_pdf,
                             size_t *out_size,
                             QwConvertReport *report);
+int qw_doc_image_to_pdf(const QwImage *image,
+                        uint8_t **out_pdf,
+                        size_t *out_size,
+                        QwConvertReport *report);
 int qw_doc_convert_memory_with_outline(const uint8_t *data,
                                          size_t size,
                                          const char *input_extension,

@@ -361,7 +361,9 @@ QwInputFormat qw_detect_format(const void *data, size_t size)
             return QW_FORMAT_HTML;
     }
     descriptor = qw_format_detect(bytes, size);
-    return descriptor ? descriptor->id : QW_FORMAT_UNKNOWN;
+    if (descriptor) return descriptor->id;
+    if (qw_image_probe(bytes, size)) return QW_FORMAT_IMAGE;
+    return QW_FORMAT_UNKNOWN;
 }
 
 const char *qw_format_name(QwInputFormat format)
@@ -380,6 +382,7 @@ const char *qw_format_name(QwInputFormat format)
     case QW_FORMAT_GIF: return "GIF";
     case QW_FORMAT_BMP: return "BMP";
     case QW_FORMAT_WEBP: return "WebP";
+    case QW_FORMAT_IMAGE: return "image";
     case QW_FORMAT_WAV: return "WAV";
     case QW_FORMAT_FLAC: return "FLAC";
     case QW_FORMAT_MP3: return "MP3";

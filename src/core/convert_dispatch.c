@@ -97,6 +97,20 @@ int qw_convert_to_pdf_memory(const void *data, size_t size,
     if (convert_region_equals(bytes, size, 0u, "%PDF-")) {
         return pdf_passthrough(bytes, size, out_pdf, out_size, report);
     }
+    if (qw_image_probe(bytes, size)) {
+        QwImage image;
+        int status;
+        memset(&image, 0, sizeof(image));
+        status = qw_image_decode(bytes, size, &image);
+        if (status != QW_IMAGE_OK) {
+            if (report) snprintf(report->note, sizeof(report->note),
+                                 "image decode failed with status %d", status);
+            return status;
+        }
+        status = qw_doc_image_to_pdf(&image, out_pdf, out_size, report);
+        qw_image_free(&image);
+        return status;
+    }
     if (convert_region_equals(bytes, size, 0u, "PK\x03\x04")) {
 #if !defined(QUIREWISE_STANDALONE_DOCX_PARSER)
         if (qw_format_docx.convert_to_pdf) {
@@ -479,6 +493,165 @@ static int csv_to_pdf_internal(const uint8_t *data, size_t size,
     return status;
 }
 
+static int convert_text_extension(const char *extension)
+{
+    return strstr(extension, "txt") || strstr(extension, "text") ||
+           strstr(extension, "md") || strstr(extension, "markdown") ||
+           strstr(extension, "markdn");
+}
+
+static QwSpreadsheetFormat convert_spreadsheet_format(const char *extension,
+                                                      int *recognized)
+{
+    *recognized = 1;
+    if (strstr(extension, "xlsx")) return QW_SPREADSHEET_FORMAT_XLSX;
+    if (strstr(extension, "xlsm")) return QW_SPREADSHEET_FORMAT_XLSM;
+    if (strstr(extension, "xltx")) return QW_SPREADSHEET_FORMAT_XLTX;
+    if (strstr(extension, "xlt")) return QW_SPREADSHEET_FORMAT_XLT;
+    if (strstr(extension, "xls")) return QW_SPREADSHEET_FORMAT_XLS;
+    if (strstr(extension, "fods")) return QW_SPREADSHEET_FORMAT_FODS;
+    if (strstr(extension, "ots")) return QW_SPREADSHEET_FORMAT_OTS;
+    if (strstr(extension, "ods")) return QW_SPREADSHEET_FORMAT_ODS;
+    *recognized = 0;
+    return QW_SPREADSHEET_FORMAT_INVALID;
+}
+
+static int convert_text_to_pdf(const uint8_t *data, size_t size,
+                               uint8_t **out_pdf, size_t *out_size,
+                               QwConvertReport *report)
+{
+    const uint8_t *text = data;
+    size_t text_size = size;
+    int rc;
+    if (size >= 3u && data[0] == 0xEFu && data[1] == 0xBBu &&
+        data[2] == 0xBFu) {
+        text = data + 3u;
+        text_size = size - 3u;
+    }
+    rc = qw_native_text_pdf_from_utf8(text, text_size, out_pdf, out_size);
+    if (rc == QW_STATUS_OK && report) {
+        snprintf(report->note, sizeof(report->note),
+                 "plain text rendered as paragraphs "
+                 "(QW_ROUTE_LOSS_TEXT_LAYOUT)");
+    }
+    return rc;
+}
+
+static int convert_spreadsheet_to_pdf(const uint8_t *data, size_t size,
+                                      QwSpreadsheetFormat format,
+                                      uint8_t **out_pdf, size_t *out_size,
+                                      QwConvertReport *report)
+{
+    QwSpreadsheetDocument *document = NULL;
+    char *html = NULL;
+    size_t html_size = 0u;
+    size_t capacity = 0u;
+    size_t sheet_count;
+    size_t sheet_index;
+    int status;
+
+    status = qw_spreadsheet_parse(format, data, size, &document);
+    if (status != QW_SPREADSHEET_OK || !document) {
+        if (report) {
+            snprintf(report->note, sizeof(report->note),
+                     "spreadsheet parse failed with status %d", status);
+        }
+        return status == QW_SPREADSHEET_ERR_RESOURCE_LIMIT
+                   ? QW_STATUS_ERR_RESOURCE_LIMIT
+                   : QW_STATUS_ERR_FORMAT;
+    }
+    sheet_count = qw_spreadsheet_sheet_count(document);
+    if (sheet_count == 0u) {
+        qw_spreadsheet_document_free(document);
+        return QW_STATUS_ERR_FORMAT;
+    }
+    if (!csv_html_append(&html, &html_size, &capacity, "<html><body>",
+                         strlen("<html><body>"))) {
+        qw_spreadsheet_document_free(document);
+        return QW_STATUS_ERR_RESOURCE_LIMIT;
+    }
+    for (sheet_index = 0u; sheet_index < sheet_count; ++sheet_index) {
+        const QwSpreadsheetSheet *sheet =
+            qw_spreadsheet_sheet_at(document, sheet_index);
+        size_t name_size = 0u;
+        const char *name;
+        size_t cell_count;
+        size_t cell_index;
+        size_t current_row = (size_t)-1;
+        size_t current_column = 0u;
+
+        if (!sheet) continue;
+        if (sheet_index > 0u &&
+            !csv_html_append(&html, &html_size, &capacity,
+                             "<div style=\"page-break-before:always\"></div>",
+                             strlen("<div style=\"page-break-before:always\"></div>")))
+            break;
+        name = qw_spreadsheet_sheet_name(sheet, &name_size);
+        if (name && name_size) {
+            if (!csv_html_append(&html, &html_size, &capacity, "<h1>", 4u) ||
+                !csv_html_escape(&html, &html_size, &capacity,
+                                 (const uint8_t *)name, name_size) ||
+                !csv_html_append(&html, &html_size, &capacity, "</h1>", 5u))
+                break;
+        }
+        if (!csv_html_append(&html, &html_size, &capacity, "<table>",
+                             strlen("<table>")))
+            break;
+        cell_count = qw_spreadsheet_cell_count(sheet);
+        for (cell_index = 0u; cell_index < cell_count; ++cell_index) {
+            QwSpreadsheetCellView cell;
+            memset(&cell, 0, sizeof(cell));
+            if (qw_spreadsheet_cell_at(sheet, cell_index, &cell) !=
+                QW_SPREADSHEET_OK)
+                continue;
+            if (cell.row != current_row) {
+                if (current_row != (size_t)-1 &&
+                    !csv_html_append(&html, &html_size, &capacity, "</tr>", 5u))
+                    break;
+                if (!csv_html_append(&html, &html_size, &capacity, "<tr>", 4u))
+                    break;
+                current_row = cell.row;
+                current_column = 0u;
+            }
+            while (current_column < cell.column) {
+                if (!csv_html_append(&html, &html_size, &capacity,
+                                     "<td></td>", 9u))
+                    break;
+                ++current_column;
+            }
+            if (current_column != cell.column) break;
+            if (!csv_html_append(&html, &html_size, &capacity, "<td>", 4u) ||
+                (cell.value && cell.value_size &&
+                 !csv_html_escape(&html, &html_size, &capacity, cell.value,
+                                  cell.value_size)) ||
+                !csv_html_append(&html, &html_size, &capacity, "</td>", 5u))
+                break;
+            ++current_column;
+        }
+        if (current_row != (size_t)-1 &&
+            !csv_html_append(&html, &html_size, &capacity, "</tr>", 5u))
+            break;
+        if (!csv_html_append(&html, &html_size, &capacity, "</table>",
+                             strlen("</table>")))
+            break;
+    }
+    if (!csv_html_append(&html, &html_size, &capacity, "</body></html>",
+                         strlen("</body></html>"))) {
+        qw_spreadsheet_document_free(document);
+        free(html);
+        return QW_STATUS_ERR_RESOURCE_LIMIT;
+    }
+    qw_spreadsheet_document_free(document);
+    status = qw_doc_convert_html(html, html_size, out_pdf, out_size, report);
+    free(html);
+    if (status == QW_STATUS_OK && report) {
+        snprintf(report->note, sizeof(report->note),
+                 "spreadsheet layout: %zu sheet(s) rendered as tables "
+                 "(QW_ROUTE_LOSS_TEXT_LAYOUT)", sheet_count);
+    }
+    return status;
+}
+
 int qw_doc_convert_memory(const uint8_t *data, size_t size,
                             const char *input_extension, int reflow_epub,
                             uint8_t **out_pdf, size_t *out_size,
@@ -496,6 +669,9 @@ int qw_doc_convert_memory(const uint8_t *data, size_t size,
     int is_pdf = 0;
     int is_fb2 = 0;
     int is_csv = 0;
+    int is_text = 0;
+    int is_spreadsheet = 0;
+    QwSpreadsheetFormat spreadsheet_format = QW_SPREADSHEET_FORMAT_INVALID;
     const char *extension = input_extension ? input_extension : "";
 
     if (!out_pdf || !out_size) return QW_STATUS_ERR_INVALID_ARGUMENT;
@@ -520,7 +696,25 @@ int qw_doc_convert_memory(const uint8_t *data, size_t size,
     }
 
     if (convert_region_equals(data, size, 0u, "%PDF-")) is_pdf = 1;
-    else if (convert_region_equals(data, size, 0u, "PK\x03\x04")) {
+    else if (qw_image_probe(data, size)) {
+        QwImage image;
+        int status;
+        memset(&image, 0, sizeof(image));
+        status = qw_image_decode(data, size, &image);
+        if (status != QW_IMAGE_OK) {
+            if (report) snprintf(report->note, sizeof(report->note),
+                                 "image decode failed with status %d", status);
+            return status;
+        }
+        status = qw_doc_image_to_pdf(&image, out_pdf, out_size, report);
+        qw_image_free(&image);
+        return status;
+    }
+    else if ((spreadsheet_format = convert_spreadsheet_format(
+                  extension, &is_spreadsheet)) !=
+             QW_SPREADSHEET_FORMAT_INVALID) {
+        /* ZIP-based XLSX/ODS packages are spreadsheets, not DOCX/ODT. */
+    } else if (convert_region_equals(data, size, 0u, "PK\x03\x04")) {
         if (strstr(extension, "docx") || strstr(extension, "docm") ||
             strstr(extension, "dotx")) {
             is_docx = 1;
@@ -535,6 +729,8 @@ int qw_doc_convert_memory(const uint8_t *data, size_t size,
         is_fb2 = 1;
     } else if (strstr(extension, "csv") || strstr(extension, "tsv")) {
         is_csv = 1;
+    } else if (convert_text_extension(extension)) {
+        is_text = 1;
     } else if (convert_region_equals(data, size, 0u, "<?xml") ||
                contains_text((const char *)data, size, "office:document")) {
         is_odt = 1;
@@ -559,6 +755,13 @@ int qw_doc_convert_memory(const uint8_t *data, size_t size,
                                       : QW_SPREADSHEET_FORMAT_CSV;
         return csv_to_pdf_internal(data, size, format, out_pdf, out_size,
                                    report);
+    }
+    if (is_text) {
+        return convert_text_to_pdf(data, size, out_pdf, out_size, report);
+    }
+    if (is_spreadsheet) {
+        return convert_spreadsheet_to_pdf(data, size, spreadsheet_format,
+                                          out_pdf, out_size, report);
     }
     if (is_pdf) {
         uint8_t *copy = (uint8_t *)malloc(size);
