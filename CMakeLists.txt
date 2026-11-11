@@ -257,6 +257,14 @@ if(BUILD_TESTING)
     add_test(NAME quirewise_document_convert_dispatch
         COMMAND quirewise_document_convert_dispatch_test)
 
+    add_executable(quirewise_document_convert_file_test
+        tests/convert_file_test.c)
+    target_compile_features(quirewise_document_convert_file_test PRIVATE c_std_11)
+    target_link_libraries(quirewise_document_convert_file_test PRIVATE
+        quirewise_document)
+    add_test(NAME quirewise_document_convert_file
+        COMMAND quirewise_document_convert_file_test)
+
     add_executable(quirewise_document_format_registry_test
         tests/format_registry_test.c)
     target_compile_features(quirewise_document_format_registry_test PRIVATE c_std_11)

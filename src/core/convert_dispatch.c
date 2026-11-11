@@ -51,6 +51,21 @@ static int contains_text(const uint8_t *data, size_t size, const char *text)
     return 0;
 }
 
+/* Skip a UTF-8 BOM and leading ASCII whitespace before sniffing text. */
+static const uint8_t *convert_skip_preamble(const uint8_t *data, size_t size)
+{
+    size_t index = 0u;
+    if (size >= 3u && data[0] == 0xEFu && data[1] == 0xBBu &&
+        data[2] == 0xBFu) {
+        index = 3u;
+    }
+    while (index < size && (data[index] == ' ' || data[index] == '\t' ||
+                            data[index] == '\r' || data[index] == '\n')) {
+        ++index;
+    }
+    return data + index;
+}
+
 static int pdf_passthrough(const uint8_t *data, size_t size, uint8_t **out_pdf,
                            size_t *out_size, QwConvertReport *report)
 {
@@ -115,12 +130,17 @@ int qw_convert_to_pdf_memory(const void *data, size_t size,
         }
         return QW_STATUS_ERR_FORMAT;
     }
-    if (bytes[0] == '<' &&
-        (contains_text(bytes, size, "<html") || contains_text(bytes, size, "<p") ||
-         contains_text(bytes, size, "<h1"))) {
-        rc = qw_doc_convert_html((const char *)bytes, size, out_pdf, out_size,
-                                   report);
-        return rc;
+    {
+        const uint8_t *first = convert_skip_preamble(bytes, size);
+        if (first < bytes + size && first[0] == '<' &&
+            (contains_text(bytes, size, "<html") ||
+             contains_text(bytes, size, "<p") ||
+             contains_text(bytes, size, "<h1"))) {
+            rc = qw_doc_convert_html((const char *)first,
+                                     (size_t)(bytes + size - first),
+                                     out_pdf, out_size, report);
+            return rc;
+        }
     }
     if (report) {
         snprintf(report->note, sizeof(report->note),
@@ -518,7 +538,8 @@ int qw_doc_convert_memory(const uint8_t *data, size_t size,
     } else if (convert_region_equals(data, size, 0u, "<?xml") ||
                contains_text((const char *)data, size, "office:document")) {
         is_odt = 1;
-    } else if (data[0] == '<' &&
+    } else if (convert_skip_preamble(data, size) < data + size &&
+               convert_skip_preamble(data, size)[0] == '<' &&
                (contains_text((const char *)data, size, "<html") ||
                 contains_text((const char *)data, size, "<p") ||
                 contains_text((const char *)data, size, "<h1"))) {
@@ -566,10 +587,12 @@ int qw_doc_convert_memory(const uint8_t *data, size_t size,
         rc = qw_odt_parse_native_html(data, size, format, &html, &html_size, report);
         if (rc != QW_STATUS_OK) return rc;
     } else if (is_html) {
-        html = (uint8_t *)malloc(size);
+        const uint8_t *first = convert_skip_preamble(data, size);
+        size_t html_length = (size_t)(data + size - first);
+        html = (uint8_t *)malloc(html_length ? html_length : 1u);
         if (!html) return QW_STATUS_ERR_OUT_OF_MEMORY;
-        memcpy(html, data, size);
-        html_size = size;
+        memcpy(html, first, html_length);
+        html_size = html_length;
     }
 
     if (!html) {
