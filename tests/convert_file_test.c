@@ -131,6 +131,18 @@ static void remove_outputs(void)
     remove(PNG_PDF_PATH);
 }
 
+static int buffer_contains(const uint8_t *data, size_t size,
+                           const char *needle)
+{
+    size_t needle_size = strlen(needle);
+    size_t index;
+    if (!data || !needle_size || size < needle_size) return 0;
+    for (index = 0u; index + needle_size <= size; ++index) {
+        if (memcmp(data + index, needle, needle_size) == 0) return 1;
+    }
+    return 0;
+}
+
 static int test_raster_pages(void)
 {
     static const unsigned char pixels[4] = {0u, 255u, 0u, 255u};
@@ -158,6 +170,15 @@ static int test_raster_pages(void)
           QW_STATUS_OK);
     CHECK(page_count == 2u);
     qw_pdf_close(document);
+    qw_buffer_free(pdf);
+
+    /* A4 page mode emits an A4 media box and keeps the fit inside it. */
+    pdf = NULL;
+    pdf_size = 0u;
+    memset(&report, 0, sizeof(report));
+    CHECK(qw_raster_pages_to_pdf_mode(pages, 1u, QW_RASTER_PAGE_MODE_A4, &pdf,
+                                      &pdf_size, &report) == QW_STATUS_OK);
+    CHECK(buffer_contains(pdf, pdf_size, "/MediaBox [0 0 595 842]"));
     qw_buffer_free(pdf);
     return 0;
 }

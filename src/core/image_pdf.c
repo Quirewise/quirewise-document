@@ -63,11 +63,12 @@ static int raster_page_channels(const QwRasterPage *page)
     return 0;
 }
 
-int qw_raster_pages_to_pdf(const QwRasterPage *pages,
-                           size_t count,
-                           uint8_t **out_pdf,
-                           size_t *out_size,
-                           QwConvertReport *report)
+int qw_raster_pages_to_pdf_mode(const QwRasterPage *pages,
+                                size_t count,
+                                int page_mode,
+                                uint8_t **out_pdf,
+                                size_t *out_size,
+                                QwConvertReport *report)
 {
     QwImagePdfBuffer buffer = {NULL, 0u, 0u};
     size_t objects;
@@ -128,23 +129,44 @@ int qw_raster_pages_to_pdf(const QwRasterPage *pages,
             rc = QW_STATUS_ERR_RESOURCE_LIMIT;
             goto done;
         }
-        content_length = snprintf(content, sizeof(content),
-                                  "q\n%u 0 0 %u 0 0 cm\n/Im0 Do\nQ\n",
-                                  page->width, page->height);
-        if (content_length <= 0 || (size_t)content_length >= sizeof(content)) {
-            rc = QW_STATUS_ERR_FORMAT;
-            goto done;
-        }
+        {
+            double scale_x = 1.0;
+            double scale_y = 1.0;
+            double offset_x = 0.0;
+            double offset_y = 0.0;
+            double box_w = (double)page->width;
+            double box_h = (double)page->height;
+            if (page_mode == QW_RASTER_PAGE_MODE_A4) {
+                double fit = 595.0 / (double)page->width;
+                double fit_h = 842.0 / (double)page->height;
+                if (fit_h < fit) fit = fit_h;
+                scale_x = fit;
+                scale_y = fit;
+                box_w = 595.0;
+                box_h = 842.0;
+                offset_x = (595.0 - (double)page->width * fit) / 2.0;
+                offset_y = (842.0 - (double)page->height * fit) / 2.0;
+            }
+            content_length = snprintf(content, sizeof(content),
+                                      "q\n%.4f 0 0 %.4f %.4f %.4f cm\n"
+                                      "/Im0 Do\nQ\n",
+                                      scale_x, scale_y, offset_x, offset_y);
+            if (content_length <= 0 ||
+                (size_t)content_length >= sizeof(content)) {
+                rc = QW_STATUS_ERR_FORMAT;
+                goto done;
+            }
 
-        offsets[page_object] = buffer.size;
-        if (!buffer_printf(&buffer,
-                           "%zu 0 obj\n<< /Type /Page /Parent 2 0 R "
-                           "/MediaBox [0 0 %u %u] "
-                           "/Resources << /XObject << /Im0 %zu 0 R >> >> "
-                           "/Contents %zu 0 R >>\nendobj\n",
-                           page_object, page->width, page->height,
-                           image_object, content_object))
-            goto oom;
+            offsets[page_object] = buffer.size;
+            if (!buffer_printf(&buffer,
+                               "%zu 0 obj\n<< /Type /Page /Parent 2 0 R "
+                               "/MediaBox [0 0 %g %g] "
+                               "/Resources << /XObject << /Im0 %zu 0 R >> >> "
+                               "/Contents %zu 0 R >>\nendobj\n",
+                               page_object, box_w, box_h,
+                               image_object, content_object))
+                goto oom;
+        }
 
         offsets[content_object] = buffer.size;
         if (!buffer_printf(&buffer, "%zu 0 obj\n<< /Length %d >>\nstream\n",
@@ -206,6 +228,17 @@ oom:
 done:
     free(offsets);
     return rc;
+}
+
+int qw_raster_pages_to_pdf(const QwRasterPage *pages,
+                           size_t count,
+                           uint8_t **out_pdf,
+                           size_t *out_size,
+                           QwConvertReport *report)
+{
+    return qw_raster_pages_to_pdf_mode(pages, count,
+                                       QW_RASTER_PAGE_MODE_IMAGE,
+                                       out_pdf, out_size, report);
 }
 
 int qw_doc_image_to_pdf(const QwImage *image,

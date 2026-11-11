@@ -20,12 +20,24 @@ typedef struct QwRasterPage {
     int channels;
 } QwRasterPage;
 
+/* Page box selection for raster PDF output. */
+#define QW_RASTER_PAGE_MODE_A4 0
+#define QW_RASTER_PAGE_MODE_IMAGE 1
+
 /* Build a PDF with one uncompressed image page per raster entry. */
 QW_API int qw_raster_pages_to_pdf(const QwRasterPage *pages,
                                   size_t count,
                                   uint8_t **out_pdf,
                                   size_t *out_size,
                                   QwConvertReport *report);
+
+/* Same as qw_raster_pages_to_pdf with an explicit page mode. */
+QW_API int qw_raster_pages_to_pdf_mode(const QwRasterPage *pages,
+                                       size_t count,
+                                       int page_mode,
+                                       uint8_t **out_pdf,
+                                       size_t *out_size,
+                                       QwConvertReport *report);
 
 /* Detect a known input format from its contents, including container structure. */
 QW_API QwInputFormat qw_detect_format(const void *data, size_t size);
