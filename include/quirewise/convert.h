@@ -11,6 +11,22 @@
 extern "C" {
 #endif
 
+/* A top-down 8-bit raster page: channels is 1 (gray) or 3 (RGB). */
+typedef struct QwRasterPage {
+    const uint8_t *pixels;
+    size_t stride;
+    uint32_t width;
+    uint32_t height;
+    int channels;
+} QwRasterPage;
+
+/* Build a PDF with one uncompressed image page per raster entry. */
+QW_API int qw_raster_pages_to_pdf(const QwRasterPage *pages,
+                                  size_t count,
+                                  uint8_t **out_pdf,
+                                  size_t *out_size,
+                                  QwConvertReport *report);
+
 /* Detect a known input format from its contents, including container structure. */
 QW_API QwInputFormat qw_detect_format(const void *data, size_t size);
 QW_API const char *qw_format_name(QwInputFormat format);

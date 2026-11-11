@@ -1,4 +1,5 @@
 #include <quirewise/convert.h>
+#include <quirewise/pdf.h>
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -130,6 +131,37 @@ static void remove_outputs(void)
     remove(PNG_PDF_PATH);
 }
 
+static int test_raster_pages(void)
+{
+    static const unsigned char pixels[4] = {0u, 255u, 0u, 255u};
+    QwRasterPage pages[2];
+    QwConvertReport report;
+    QwPdfDocument *document = NULL;
+    uint8_t *pdf = NULL;
+    size_t pdf_size = 0u;
+    size_t page_count = 0u;
+
+    memset(pages, 0, sizeof(pages));
+    pages[0].pixels = pixels;
+    pages[0].width = 2u;
+    pages[0].height = 2u;
+    pages[0].stride = 2u;
+    pages[0].channels = 1;
+    pages[1] = pages[0];
+
+    memset(&report, 0, sizeof(report));
+    CHECK(qw_raster_pages_to_pdf(pages, 2u, &pdf, &pdf_size, &report) ==
+          QW_STATUS_OK);
+    CHECK(pdf != NULL && pdf_size > 5u && memcmp(pdf, "%PDF-", 5u) == 0);
+    memset(&report, 0, sizeof(report));
+    CHECK(qw_pdf_open(pdf, pdf_size, &document, &page_count, &report) ==
+          QW_STATUS_OK);
+    CHECK(page_count == 2u);
+    qw_pdf_close(document);
+    qw_buffer_free(pdf);
+    return 0;
+}
+
 int main(void)
 {
     static const char html[] =
@@ -186,6 +218,8 @@ int main(void)
         CHECK(qw_detect_format("plain text", 10u) == QW_FORMAT_UNKNOWN);
         CHECK(strcmp(qw_format_name(QW_FORMAT_PDF), "unknown") != 0);
     }
+
+    CHECK(test_raster_pages() == 0);
 
     remove_outputs();
     puts("file conversion API OK");
