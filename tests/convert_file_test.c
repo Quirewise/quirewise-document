@@ -149,9 +149,13 @@ static int test_raster_pages(void)
     QwRasterPage pages[2];
     QwConvertReport report;
     QwPdfDocument *document = NULL;
+    QwPageImage rendered;
     uint8_t *pdf = NULL;
     size_t pdf_size = 0u;
     size_t page_count = 0u;
+    size_t index;
+    int has_dark;
+    int has_light;
 
     memset(pages, 0, sizeof(pages));
     pages[0].pixels = pixels;
@@ -165,20 +169,60 @@ static int test_raster_pages(void)
     CHECK(qw_raster_pages_to_pdf(pages, 2u, &pdf, &pdf_size, &report) ==
           QW_STATUS_OK);
     CHECK(pdf != NULL && pdf_size > 5u && memcmp(pdf, "%PDF-", 5u) == 0);
+    /* IMAGE mode: the page box is the pixel size in points, so the image XObject
+     * must be scaled to the whole page (a unit cm paints one point only). */
+    CHECK(buffer_contains(pdf, pdf_size, "2.0000 0 0 2.0000 0.0000 0.0000 cm"));
+    /* Objects must stay separated by whitespace: "endobj5" is not a token. */
+    CHECK(buffer_contains(pdf, pdf_size, "endobj\n5 0 obj"));
     memset(&report, 0, sizeof(report));
     CHECK(qw_pdf_open(pdf, pdf_size, &document, &page_count, &report) ==
           QW_STATUS_OK);
     CHECK(page_count == 2u);
+    memset(&rendered, 0, sizeof(rendered));
+    CHECK(qw_pdf_render_page(document, 0u, 72u, &rendered, &report) ==
+          QW_STATUS_OK);
+    CHECK(rendered.kind == QW_PAGE_IMAGE_RGB24);
+    CHECK(rendered.width == 2u && rendered.height == 2u);
+    has_dark = 0;
+    has_light = 0;
+    for (index = 0u; index < rendered.size; ++index) {
+        if (rendered.data[index] < 64u) has_dark = 1;
+        if (rendered.data[index] > 192u) has_light = 1;
+    }
+    CHECK(has_dark && has_light);
+    qw_pdf_page_free(&rendered);
     qw_pdf_close(document);
     qw_buffer_free(pdf);
 
-    /* A4 page mode emits an A4 media box and keeps the fit inside it. */
+    /* A4 page mode emits an A4 media box and fits the image inside it. */
     pdf = NULL;
     pdf_size = 0u;
     memset(&report, 0, sizeof(report));
     CHECK(qw_raster_pages_to_pdf_mode(pages, 1u, QW_RASTER_PAGE_MODE_A4, &pdf,
                                       &pdf_size, &report) == QW_STATUS_OK);
     CHECK(buffer_contains(pdf, pdf_size, "/MediaBox [0 0 595 842]"));
+    CHECK(buffer_contains(pdf, pdf_size,
+                          "595.0000 0 0 595.0000 0.0000 123.5000 cm"));
+    document = NULL;
+    page_count = 0u;
+    memset(&report, 0, sizeof(report));
+    CHECK(qw_pdf_open(pdf, pdf_size, &document, &page_count, &report) ==
+          QW_STATUS_OK);
+    CHECK(page_count == 1u);
+    memset(&rendered, 0, sizeof(rendered));
+    CHECK(qw_pdf_render_page(document, 0u, 72u, &rendered, &report) ==
+          QW_STATUS_OK);
+    CHECK(rendered.kind == QW_PAGE_IMAGE_RGB24);
+    CHECK(rendered.width == 595u && rendered.height == 842u);
+    has_dark = 0;
+    has_light = 0;
+    for (index = 0u; index < rendered.size; ++index) {
+        if (rendered.data[index] < 64u) has_dark = 1;
+        if (rendered.data[index] > 192u) has_light = 1;
+    }
+    CHECK(has_dark && has_light);
+    qw_pdf_page_free(&rendered);
+    qw_pdf_close(document);
     qw_buffer_free(pdf);
     return 0;
 }

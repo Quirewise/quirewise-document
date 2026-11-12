@@ -130,8 +130,8 @@ int qw_raster_pages_to_pdf_mode(const QwRasterPage *pages,
             goto done;
         }
         {
-            double scale_x = 1.0;
-            double scale_y = 1.0;
+            double scale_x;
+            double scale_y;
             double offset_x = 0.0;
             double offset_y = 0.0;
             double box_w = (double)page->width;
@@ -140,12 +140,20 @@ int qw_raster_pages_to_pdf_mode(const QwRasterPage *pages,
                 double fit = 595.0 / (double)page->width;
                 double fit_h = 842.0 / (double)page->height;
                 if (fit_h < fit) fit = fit_h;
-                scale_x = fit;
-                scale_y = fit;
+                /* An image XObject paints the unit square, so the cm matrix
+                 * carries the drawn size in points, not a pixels-per-point
+                 * ratio. */
+                scale_x = (double)page->width * fit;
+                scale_y = (double)page->height * fit;
                 box_w = 595.0;
                 box_h = 842.0;
-                offset_x = (595.0 - (double)page->width * fit) / 2.0;
-                offset_y = (842.0 - (double)page->height * fit) / 2.0;
+                offset_x = (595.0 - scale_x) / 2.0;
+                offset_y = (842.0 - scale_y) / 2.0;
+            } else {
+                /* IMAGE mode: the page box is the pixel size in points, so the
+                 * image covers the whole page. */
+                scale_x = (double)page->width;
+                scale_y = (double)page->height;
             }
             content_length = snprintf(content, sizeof(content),
                                       "q\n%.4f 0 0 %.4f %.4f %.4f cm\n"
@@ -172,7 +180,7 @@ int qw_raster_pages_to_pdf_mode(const QwRasterPage *pages,
         if (!buffer_printf(&buffer, "%zu 0 obj\n<< /Length %d >>\nstream\n",
                            content_object, content_length) ||
             !buffer_append(&buffer, content, (size_t)content_length) ||
-            !buffer_append(&buffer, "endstream\nendobj\n", 16))
+            !buffer_append(&buffer, "endstream\nendobj\n", 17))
             goto oom;
 
         offsets[image_object] = buffer.size;
@@ -193,7 +201,7 @@ int qw_raster_pages_to_pdf_mode(const QwRasterPage *pages,
                     goto oom;
             }
         }
-        if (!buffer_append(&buffer, "\nendstream\nendobj\n", 17)) goto oom;
+        if (!buffer_append(&buffer, "\nendstream\nendobj\n", 18)) goto oom;
     }
 
     xref = buffer.size;
