@@ -200,9 +200,9 @@ static int test_raster_pages(void)
     memset(&report, 0, sizeof(report));
     CHECK(qw_raster_pages_to_pdf_mode(pages, 1u, QW_RASTER_PAGE_MODE_A4, &pdf,
                                       &pdf_size, &report) == QW_STATUS_OK);
-    CHECK(buffer_contains(pdf, pdf_size, "/MediaBox [0 0 595 842]"));
+    CHECK(buffer_contains(pdf, pdf_size, "/MediaBox [0 0 595.276 841.89]"));
     CHECK(buffer_contains(pdf, pdf_size,
-                          "595.0000 0 0 595.0000 0.0000 123.5000 cm"));
+                          "595.2760 0 0 595.2760 0.0000 123.3070 cm"));
     document = NULL;
     page_count = 0u;
     memset(&report, 0, sizeof(report));
@@ -213,7 +213,7 @@ static int test_raster_pages(void)
     CHECK(qw_pdf_render_page(document, 0u, 72u, &rendered, &report) ==
           QW_STATUS_OK);
     CHECK(rendered.kind == QW_PAGE_IMAGE_RGB24);
-    CHECK(rendered.width == 595u && rendered.height == 842u);
+    CHECK(rendered.width == 596u && rendered.height == 842u);
     has_dark = 0;
     has_light = 0;
     for (index = 0u; index < rendered.size; ++index) {

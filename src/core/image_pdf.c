@@ -56,6 +56,10 @@ static int buffer_printf(QwImagePdfBuffer *buffer, const char *format, ...)
 
 /* One page costs three objects: page, contents and image XObject. */
 #define QW_RASTER_FIRST_PAGE_OBJECT 3u
+/* A4 portrait in PDF points; matches the PDZ writer so every page route emits
+ * the same media box for --page a4. */
+#define QW_RASTER_A4_WIDTH 595.276
+#define QW_RASTER_A4_HEIGHT 841.89
 
 static int raster_page_channels(const QwRasterPage *page)
 {
@@ -137,18 +141,18 @@ int qw_raster_pages_to_pdf_mode(const QwRasterPage *pages,
             double box_w = (double)page->width;
             double box_h = (double)page->height;
             if (page_mode == QW_RASTER_PAGE_MODE_A4) {
-                double fit = 595.0 / (double)page->width;
-                double fit_h = 842.0 / (double)page->height;
+                double fit = QW_RASTER_A4_WIDTH / (double)page->width;
+                double fit_h = QW_RASTER_A4_HEIGHT / (double)page->height;
                 if (fit_h < fit) fit = fit_h;
                 /* An image XObject paints the unit square, so the cm matrix
                  * carries the drawn size in points, not a pixels-per-point
                  * ratio. */
                 scale_x = (double)page->width * fit;
                 scale_y = (double)page->height * fit;
-                box_w = 595.0;
-                box_h = 842.0;
-                offset_x = (595.0 - scale_x) / 2.0;
-                offset_y = (842.0 - scale_y) / 2.0;
+                box_w = QW_RASTER_A4_WIDTH;
+                box_h = QW_RASTER_A4_HEIGHT;
+                offset_x = (QW_RASTER_A4_WIDTH - scale_x) / 2.0;
+                offset_y = (QW_RASTER_A4_HEIGHT - scale_y) / 2.0;
             } else {
                 /* IMAGE mode: the page box is the pixel size in points, so the
                  * image covers the whole page. */
