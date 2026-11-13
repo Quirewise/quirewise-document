@@ -17,6 +17,15 @@ typedef struct QwPdfOutlineItem {
     size_t depth;
 } QwPdfOutlineItem;
 
+int qw_doc_convert_memory_with_options(const uint8_t *data,
+                                        size_t size,
+                                        const char *input_extension,
+                                        int reflow_epub,
+                                        const QwConvertOptions *options,
+                                        uint8_t **out_pdf,
+                                        size_t *out_size,
+                                        QwConvertReport *report);
+
 int qw_doc_convert_memory(const uint8_t *data,
                             size_t size,
                             const char *input_extension,
@@ -28,6 +37,11 @@ int qw_doc_image_to_pdf(const QwImage *image,
                         uint8_t **out_pdf,
                         size_t *out_size,
                         QwConvertReport *report);
+int qw_doc_image_to_pdf_mode(const QwImage *image,
+                             int page_mode,
+                             uint8_t **out_pdf,
+                             size_t *out_size,
+                             QwConvertReport *report);
 int qw_doc_convert_memory_with_outline(const uint8_t *data,
                                          size_t size,
                                          const char *input_extension,

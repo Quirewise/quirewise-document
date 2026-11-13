@@ -253,10 +253,11 @@ int qw_raster_pages_to_pdf(const QwRasterPage *pages,
                                        out_pdf, out_size, report);
 }
 
-int qw_doc_image_to_pdf(const QwImage *image,
-                        uint8_t **out_pdf,
-                        size_t *out_size,
-                        QwConvertReport *report)
+int qw_doc_image_to_pdf_mode(const QwImage *image,
+                             int page_mode,
+                             uint8_t **out_pdf,
+                             size_t *out_size,
+                             QwConvertReport *report)
 {
     QwRasterPage page;
     int channels;
@@ -271,5 +272,15 @@ int qw_doc_image_to_pdf(const QwImage *image,
     page.width = image->width;
     page.height = image->height;
     page.channels = channels;
-    return qw_raster_pages_to_pdf(&page, 1u, out_pdf, out_size, report);
+    return qw_raster_pages_to_pdf_mode(&page, 1u, page_mode, out_pdf, out_size,
+                                       report);
+}
+
+int qw_doc_image_to_pdf(const QwImage *image,
+                        uint8_t **out_pdf,
+                        size_t *out_size,
+                        QwConvertReport *report)
+{
+    return qw_doc_image_to_pdf_mode(image, QW_RASTER_PAGE_MODE_IMAGE, out_pdf,
+                                    out_size, report);
 }

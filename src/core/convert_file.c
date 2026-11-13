@@ -432,7 +432,8 @@ int qw_convert_file_to_format(const char *input_path,
     if (strcmp(extension, "epub") == 0) reflow = 1;
 
     if (output_format == QW_FORMAT_PDF) {
-        rc = qw_doc_convert_memory(data, size, extension, reflow, &output,
+        rc = qw_doc_convert_memory_with_options(data, size, extension, reflow, options,
+                                   &output,
                                    &output_size, report);
     } else {
         rc = qw_convert_to_format_memory(data, size, output_format, options,
@@ -514,7 +515,8 @@ int qw_check_file(const char *input_path,
     } else {
         uint8_t *output = NULL;
         size_t output_size = 0u;
-        rc = qw_doc_convert_memory(data, size, extension, reflow, &output,
+        rc = qw_doc_convert_memory_with_options(data, size, extension, reflow, options,
+                                   &output,
                                    &output_size, report);
         free(output);
         if (report) report->output_size = output_size;

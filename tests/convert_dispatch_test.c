@@ -36,6 +36,33 @@ int main(void)
     uint8_t *pdf = NULL;
     size_t pdf_size = 0u;
 
+    /* EML is routed through the email reader and the layout writer. */
+    {
+        static const char eml[] =
+            "From: sender@example.com\r\n"
+            "To: receiver@example.com\r\n"
+            "Subject: Dispatch EML\r\n"
+            "MIME-Version: 1.0\r\n"
+            "Content-Type: text/plain; charset=utf-8\r\n"
+            "\r\n"
+            "Hello from the EML dispatch route.\r\n";
+        uint8_t *text = NULL;
+        size_t text_size = 0u;
+        int rc = qw_convert_to_pdf_memory(eml, sizeof(eml) - 1u, &options, &pdf,
+                                          &pdf_size, &report);
+        CHECK(rc == QW_STATUS_OK);
+        CHECK(is_pdf(pdf, pdf_size));
+        rc = qw_convert_to_format_memory(pdf, pdf_size, QW_FORMAT_TXT, &options,
+                                         &text, &text_size, &report);
+        CHECK(rc == QW_STATUS_OK);
+        CHECK(text_size > 0u);
+        CHECK(strstr((const char *)text, "EML dispatch route") != NULL);
+        qw_buffer_free(text);
+        free(pdf);
+        pdf = NULL;
+        pdf_size = 0u;
+    }
+
     memset(&report, 0, sizeof(report));
     CHECK(qw_convert_to_pdf_memory(FODT, strlen(FODT), &options, &pdf, &pdf_size,
                                    &report) == QW_STATUS_OK);
@@ -81,11 +108,17 @@ int main(void)
         CHECK(pdf == NULL);
     }
 
-    /* A ZIP container that is neither DOCX nor ODT reports FORMAT. */
+    /* A ZIP container that is neither DOCX nor ODT is reported as unsupported,
+     * not as a broken OpenDocument package. */
     {
         static const uint8_t zip_like[] = {'P', 'K', 0x03u, 0x04u, 0u, 0u, 0u, 0u};
+        QwConvertReport zip_report;
+        memset(&zip_report, 0, sizeof(zip_report));
         CHECK(qw_convert_to_pdf_memory(zip_like, sizeof(zip_like), &options, &pdf,
-                                       &pdf_size, NULL) == QW_STATUS_ERR_FORMAT);
+                                       &pdf_size, &zip_report) ==
+              QW_STATUS_ERR_UNSUPPORTED);
+        CHECK(pdf == NULL && pdf_size == 0u);
+        CHECK(zip_report.note[0] != '\0');
     }
 
     /* The historical convert-memory entry renders ODT/FODT/HTML internally. */

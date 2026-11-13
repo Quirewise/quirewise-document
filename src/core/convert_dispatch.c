@@ -1,20 +1,35 @@
 /* Public conversion dispatch for the document package.
  *
- * `qw_convert_to_pdf_memory` was declared in `quirewise/convert.h` but never
- * implemented. This file provides a real dispatcher for the formats this
- * package can render internally:
+ * `qw_convert_to_pdf_memory` / `qw_convert_to_format_memory` route inputs to
+ * the internal renderers. Every format named in app/docs/formats that is owned
+ * by this package has a branch here; otherwise the entry point returns
+ * `QW_STATUS_ERR_UNSUPPORTED` with an explanatory note instead of letting a
+ * parser guess.
  *
  *  - `%PDF-` input is passed through unchanged (valid PDF stays valid);
  *  - HTML input is rendered by the internal layout/PDF writer;
- *  - flat ODF (`<?xml ... office:document`) goes through the ODT converter;
- *  - ZIP containers are offered to the DOCX and ODT converters in turn, which
- *    validate the package structure themselves.
+ *  - flat ODF (`<?xml ... office:document`) is split into FODT / FODP;
+ *  - ZIP containers are identified by their member names (member names are
+ *    stored verbatim in the central directory) before any parser runs:
+ *    DOCX/DOCM/DOTX/DOTM, ODT/OTT, PPTX family, ODP/OTP, HWPX, HTMLZ, TXTZ,
+ *    PMLZ, XLSX family and ODS, plus EPUB (reflow);
+ *  - EML, MOBI/AZW3 and plain/markup text use the ebook readers or the text
+ *    layout path.
  *
- * Anything else returns `QW_STATUS_ERR_UNSUPPORTED` with an explanatory note.
+ * Unknown ZIP packages report `QW_STATUS_ERR_UNSUPPORTED`; they are no longer
+ * reported as a broken OpenDocument package.
  * No MuPDF code is involved. */
 
 #include <quirewise/convert.h>
 #include <quirewise/pdf.h>
+#include <quirewise/email.h>
+#include <quirewise/hwpx.h>
+#include <quirewise/htmlz.h>
+#include <quirewise/mobi.h>
+#include <quirewise/odf_presentation.h>
+#include <quirewise/pml.h>
+#include <quirewise/pptx.h>
+#include <quirewise/text_archive.h>
 
 #include "format_registry.h"
 #include "png_encoder.h"
@@ -26,11 +41,6 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-
-extern const QwFormatDescriptor qw_format_odt;
-#if !defined(QUIREWISE_STANDALONE_DOCX_PARSER)
-extern const QwFormatDescriptor qw_format_docx;
-#endif
 
 static int convert_region_equals(const uint8_t *data, size_t size, size_t offset,
                                  const char *text)
@@ -81,14 +91,23 @@ static int pdf_passthrough(const uint8_t *data, size_t size, uint8_t **out_pdf,
     return QW_STATUS_OK;
 }
 
+/* One dispatcher for memory and file conversions. `qw_doc_convert_memory`
+ * covers every input family this package owns, so the public entry point no
+ * longer keeps a second, narrower ZIP/XML sniffer that reported unsupported
+ * packages as broken OpenDocument files. */
+int qw_doc_convert_memory(const uint8_t *data, size_t size,
+                          const char *input_extension, int reflow_epub,
+                          uint8_t **out_pdf, size_t *out_size,
+                          QwConvertReport *report);
+
 int qw_convert_to_pdf_memory(const void *data, size_t size,
                              const QwConvertOptions *options,
                              uint8_t **out_pdf, size_t *out_size,
                              QwConvertReport *report)
 {
     const uint8_t *bytes = (const uint8_t *)data;
-    int rc;
 
+    (void)options;
     if (!out_pdf || !out_size) return QW_STATUS_ERR_INVALID_ARGUMENT;
     *out_pdf = NULL;
     *out_size = 0u;
@@ -97,70 +116,8 @@ int qw_convert_to_pdf_memory(const void *data, size_t size,
     if (convert_region_equals(bytes, size, 0u, "%PDF-")) {
         return pdf_passthrough(bytes, size, out_pdf, out_size, report);
     }
-    if (qw_image_probe(bytes, size)) {
-        QwImage image;
-        int status;
-        memset(&image, 0, sizeof(image));
-        status = qw_image_decode(bytes, size, &image);
-        if (status != QW_IMAGE_OK) {
-            if (report) snprintf(report->note, sizeof(report->note),
-                                 "image decode failed with status %d", status);
-            return status;
-        }
-        status = qw_doc_image_to_pdf(&image, out_pdf, out_size, report);
-        qw_image_free(&image);
-        return status;
-    }
-    if (convert_region_equals(bytes, size, 0u, "PK\x03\x04")) {
-#if !defined(QUIREWISE_STANDALONE_DOCX_PARSER)
-        if (qw_format_docx.convert_to_pdf) {
-            rc = qw_format_docx.convert_to_pdf(bytes, size, options, out_pdf,
-                                               out_size, report);
-            if (rc == QW_STATUS_OK) return rc;
-        }
-#endif
-        if (qw_format_odt.convert_to_pdf) {
-            rc = qw_format_odt.convert_to_pdf(bytes, size, options, out_pdf,
-                                              out_size, report);
-            if (rc == QW_STATUS_OK) return rc;
-        }
-        if (report) {
-            snprintf(report->note, sizeof(report->note),
-                     "ZIP container is not a supported DOCX/ODT document for PDF conversion");
-        }
-        return QW_STATUS_ERR_FORMAT;
-    }
-    if (convert_region_equals(bytes, size, 0u, "<?xml") ||
-        contains_text(bytes, size, "office:document")) {
-        /* The ODT converter recognises flat OpenDocument XML itself. */
-        if (qw_format_odt.convert_to_pdf) {
-            rc = qw_format_odt.convert_to_pdf(bytes, size, options, out_pdf,
-                                              out_size, report);
-            if (rc == QW_STATUS_OK) return rc;
-        }
-        if (report) {
-            snprintf(report->note, sizeof(report->note),
-                     "Flat XML is not a supported OpenDocument text file");
-        }
-        return QW_STATUS_ERR_FORMAT;
-    }
-    {
-        const uint8_t *first = convert_skip_preamble(bytes, size);
-        if (first < bytes + size && first[0] == '<' &&
-            (contains_text(bytes, size, "<html") ||
-             contains_text(bytes, size, "<p") ||
-             contains_text(bytes, size, "<h1"))) {
-            rc = qw_doc_convert_html((const char *)first,
-                                     (size_t)(bytes + size - first),
-                                     out_pdf, out_size, report);
-            return rc;
-        }
-    }
-    if (report) {
-        snprintf(report->note, sizeof(report->note),
-                 "No internal PDF renderer for this input format");
-    }
-    return QW_STATUS_ERR_UNSUPPORTED;
+    return qw_doc_convert_memory(bytes, size, NULL, 0, out_pdf, out_size,
+                                 report);
 }
 
 /* Map the historical MuPDF "convert memory" entry onto the internal writers. */
@@ -652,10 +609,329 @@ static int convert_spreadsheet_to_pdf(const uint8_t *data, size_t size,
     return status;
 }
 
-int qw_doc_convert_memory(const uint8_t *data, size_t size,
-                            const char *input_extension, int reflow_epub,
-                            uint8_t **out_pdf, size_t *out_size,
-                            QwConvertReport *report)
+/* ------------------------------------------------------------------ */
+/* Layout and ebook adapter routes                                    */
+/*                                                                    */
+/* The format packages expose typed readers that produce layout HTML  */
+/* or plain text. `qw_doc_convert_memory` used to ignore them, so the  */
+/* advertised PPTX/ODP/HWPX/EML/HTMLZ/TXTZ/PMLZ/MOBI routes were only  */
+/* reachable through the per-format APIs. These adapters connect them  */
+/* to the shared file conversion entry point.                          */
+/* ------------------------------------------------------------------ */
+
+static int convert_extension_contains(const char *extension, const char *name)
+{
+    return extension && extension[0] && strstr(extension, name) != NULL;
+}
+
+static int convert_html_to_pdf(const uint8_t *html, size_t size,
+                               uint8_t **out_pdf, size_t *out_size,
+                               QwConvertReport *report)
+{
+    if (!html || !size) return QW_STATUS_ERR_FORMAT;
+    return qw_doc_convert_html((const char *)html, size, out_pdf, out_size,
+                               report);
+}
+
+static int convert_pptx_to_pdf(const uint8_t *data, size_t size,
+                               const char *extension, uint8_t **out_pdf,
+                               size_t *out_size, QwConvertReport *report)
+{
+    QwPptxFormat format = QW_PPTX_FORMAT_PPTX;
+    QwPptxDocument *document = NULL;
+    const uint8_t *html;
+    size_t html_size = 0u;
+    QwPptxStatus status;
+    int rc;
+
+    if (convert_extension_contains(extension, "pptm"))
+        format = QW_PPTX_FORMAT_PPTM;
+    else if (convert_extension_contains(extension, "potx"))
+        format = QW_PPTX_FORMAT_POTX;
+    else if (convert_extension_contains(extension, "potm"))
+        format = QW_PPTX_FORMAT_POTM;
+    else if (convert_extension_contains(extension, "ppsx"))
+        format = QW_PPTX_FORMAT_PPSX;
+    else if (convert_extension_contains(extension, "ppsm"))
+        format = QW_PPTX_FORMAT_PPSM;
+
+    status = qw_pptx_parse(format, data, size, &document);
+    if (status != QW_PPTX_OK || !document) {
+        if (report) snprintf(report->note, sizeof(report->note),
+                             "presentation parse failed with status %d",
+                             (int)status);
+        return status == QW_PPTX_ERR_OUT_OF_MEMORY
+                   ? QW_STATUS_ERR_OUT_OF_MEMORY
+                   : status == QW_PPTX_ERR_RESOURCE_LIMIT
+                         ? QW_STATUS_ERR_RESOURCE_LIMIT
+                         : QW_STATUS_ERR_FORMAT;
+    }
+    html = qw_pptx_document_html(document, &html_size);
+    rc = convert_html_to_pdf(html, html_size, out_pdf, out_size, report);
+    qw_pptx_document_free(document);
+    if (rc == QW_STATUS_OK && report) {
+        snprintf(report->note, sizeof(report->note),
+                 "presentation layout: slide text rendered; shapes, images, "
+                 "notes and styles are not preserved");
+    }
+    return rc;
+}
+
+static int convert_odp_to_pdf(const uint8_t *data, size_t size,
+                              const char *extension, uint8_t **out_pdf,
+                              size_t *out_size, QwConvertReport *report)
+{
+    QwOdpFormat format = QW_ODP_FORMAT_ODP;
+    QwOdpDocument *document = NULL;
+    const uint8_t *html;
+    size_t html_size = 0u;
+    QwOdpStatus status;
+    int rc;
+
+    if (convert_extension_contains(extension, "otp"))
+        format = QW_ODP_FORMAT_OTP;
+    else if (convert_extension_contains(extension, "fodp"))
+        format = QW_ODP_FORMAT_FODP;
+
+    status = qw_odp_parse(format, data, size, &document);
+    if (status != QW_ODP_OK || !document) {
+        if (report) snprintf(report->note, sizeof(report->note),
+                             "OpenDocument presentation parse failed with "
+                             "status %d", (int)status);
+        return status == QW_ODP_ERR_OUT_OF_MEMORY
+                   ? QW_STATUS_ERR_OUT_OF_MEMORY
+                   : status == QW_ODP_ERR_RESOURCE_LIMIT
+                         ? QW_STATUS_ERR_RESOURCE_LIMIT
+                         : QW_STATUS_ERR_FORMAT;
+    }
+    html = qw_odp_document_html(document, &html_size);
+    rc = convert_html_to_pdf(html, html_size, out_pdf, out_size, report);
+    qw_odp_document_free(document);
+    if (rc == QW_STATUS_OK && report) {
+        snprintf(report->note, sizeof(report->note),
+                 "OpenDocument presentation layout: slide text rendered; "
+                 "shapes, images and styles are not preserved");
+    }
+    return rc;
+}
+
+static int convert_hwpx_to_pdf(const uint8_t *data, size_t size,
+                               uint8_t **out_pdf, size_t *out_size,
+                               QwConvertReport *report)
+{
+    QwHwpxDocument *document = NULL;
+    const uint8_t *html;
+    size_t html_size = 0u;
+    QwHwpxStatus status;
+    int rc;
+
+    status = qw_hwpx_parse(data, size, &document);
+    if (status != QW_HWPX_OK || !document) {
+        if (report) snprintf(report->note, sizeof(report->note),
+                             "HWPX parse failed with status %d", (int)status);
+        return status == QW_HWPX_ERR_OUT_OF_MEMORY
+                   ? QW_STATUS_ERR_OUT_OF_MEMORY
+                   : status == QW_HWPX_ERR_RESOURCE_LIMIT
+                         ? QW_STATUS_ERR_RESOURCE_LIMIT
+                         : QW_STATUS_ERR_FORMAT;
+    }
+    html = qw_hwpx_document_html(document, &html_size);
+    rc = convert_html_to_pdf(html, html_size, out_pdf, out_size, report);
+    qw_hwpx_document_free(document);
+    if (rc == QW_STATUS_OK && report) {
+        snprintf(report->note, sizeof(report->note),
+                 "HWPX layout: paragraph text and simple tables rendered; "
+                 "styles, images and metadata are not preserved");
+    }
+    return rc;
+}
+
+static int convert_email_to_pdf(const uint8_t *data, size_t size,
+                                uint8_t **out_pdf, size_t *out_size,
+                                QwConvertReport *report)
+{
+    QwEmailDocument *document = NULL;
+    const uint8_t *html;
+    size_t html_size = 0u;
+    QwEmailStatus status;
+    int rc;
+
+    status = qw_email_parse(data, size, &document);
+    if (status != QW_EMAIL_OK || !document) {
+        if (report) snprintf(report->note, sizeof(report->note),
+                             "EML parse failed with status %d", (int)status);
+        return status == QW_EMAIL_ERROR_OUT_OF_MEMORY
+                   ? QW_STATUS_ERR_OUT_OF_MEMORY
+                   : status == QW_EMAIL_ERROR_RESOURCE_LIMIT
+                         ? QW_STATUS_ERR_RESOURCE_LIMIT
+                         : QW_STATUS_ERR_FORMAT;
+    }
+    html = qw_email_document_html(document, &html_size);
+    rc = convert_html_to_pdf(html, html_size, out_pdf, out_size, report);
+    qw_email_document_free(document);
+    if (rc == QW_STATUS_OK && report) {
+        snprintf(report->note, sizeof(report->note),
+                 "EML layout: selected body rendered; attachments are listed, "
+                 "not exported");
+    }
+    return rc;
+}
+
+static int convert_htmlz_to_pdf(const uint8_t *data, size_t size,
+                                uint8_t **out_pdf, size_t *out_size,
+                                QwConvertReport *report)
+{
+    QwHtmlzDocument document;
+    const char *error = NULL;
+    QwHtmlzStatus status;
+    int rc;
+
+    memset(&document, 0, sizeof(document));
+    status = qw_htmlz_extract_primary_document(data, size, &document, &error);
+    if (status != QW_HTMLZ_OK) {
+        if (report) snprintf(report->note, sizeof(report->note),
+                             "HTMLZ extraction failed: %s",
+                             error ? error : qw_htmlz_status_string(status));
+        return status == QW_HTMLZ_ERR_OUT_OF_MEMORY
+                   ? QW_STATUS_ERR_OUT_OF_MEMORY
+                   : status == QW_HTMLZ_ERR_RESOURCE_LIMIT
+                         ? QW_STATUS_ERR_RESOURCE_LIMIT
+                         : QW_STATUS_ERR_FORMAT;
+    }
+    rc = convert_html_to_pdf(document.html_bytes, document.html_size, out_pdf,
+                             out_size, report);
+    qw_htmlz_document_free(&document);
+    if (rc == QW_STATUS_OK && report) {
+        snprintf(report->note, sizeof(report->note),
+                 "HTMLZ layout: index document rendered; package CSS, images "
+                 "and other members are not preserved");
+    }
+    return rc;
+}
+
+static int convert_text_archive_to_pdf(const uint8_t *data, size_t size,
+                                       QwTextArchiveKind kind,
+                                       uint8_t **out_pdf, size_t *out_size,
+                                       QwConvertReport *report)
+{
+    QwTextArchiveDocument document;
+    const char *error = NULL;
+    QwTextArchiveStatus status;
+    int rc;
+
+    memset(&document, 0, sizeof(document));
+    status = qw_text_archive_extract_primary(data, size, kind, &document,
+                                             &error);
+    if (status != QW_TEXT_ARCHIVE_OK) {
+        if (report) snprintf(report->note, sizeof(report->note),
+                             "text archive extraction failed: %s",
+                             error ? error
+                                   : qw_text_archive_status_string(status));
+        return status == QW_TEXT_ARCHIVE_ERR_OUT_OF_MEMORY
+                   ? QW_STATUS_ERR_OUT_OF_MEMORY
+                   : status == QW_TEXT_ARCHIVE_ERR_RESOURCE_LIMIT
+                         ? QW_STATUS_ERR_RESOURCE_LIMIT
+                         : QW_STATUS_ERR_FORMAT;
+    }
+    rc = convert_text_to_pdf(document.text_bytes, document.text_size, out_pdf,
+                             out_size, report);
+    qw_text_archive_document_free(&document);
+    if (rc == QW_STATUS_OK && report) {
+        snprintf(report->note, sizeof(report->note),
+                 "text archive: primary member rendered as paragraphs; other "
+                 "members are not preserved");
+    }
+    return rc;
+}
+
+static int convert_pmlz_to_pdf(const uint8_t *data, size_t size,
+                               uint8_t **out_pdf, size_t *out_size,
+                               QwConvertReport *report)
+{
+    QwTextArchiveDocument archive;
+    QwPmlDocument document;
+    const char *error = NULL;
+    QwTextArchiveStatus archive_status;
+    QwPmlStatus pml_status;
+    int rc;
+
+    memset(&archive, 0, sizeof(archive));
+    archive_status = qw_text_archive_extract_primary(
+        data, size, QW_TEXT_ARCHIVE_PMLZ, &archive, &error);
+    if (archive_status != QW_TEXT_ARCHIVE_OK) {
+        if (report) snprintf(report->note, sizeof(report->note),
+                             "PMLZ extraction failed: %s",
+                             error ? error
+                                   : qw_text_archive_status_string(
+                                         archive_status));
+        return archive_status == QW_TEXT_ARCHIVE_ERR_OUT_OF_MEMORY
+                   ? QW_STATUS_ERR_OUT_OF_MEMORY
+                   : archive_status == QW_TEXT_ARCHIVE_ERR_RESOURCE_LIMIT
+                         ? QW_STATUS_ERR_RESOURCE_LIMIT
+                         : QW_STATUS_ERR_FORMAT;
+    }
+    memset(&document, 0, sizeof(document));
+    pml_status = qw_pml_parse(archive.text_bytes, archive.text_size, &document);
+    qw_text_archive_document_free(&archive);
+    if (pml_status != QW_PML_OK) {
+        if (report) snprintf(report->note, sizeof(report->note),
+                             "PML parse failed with status %d",
+                             (int)pml_status);
+        return pml_status == QW_PML_ERR_OUT_OF_MEMORY
+                   ? QW_STATUS_ERR_OUT_OF_MEMORY
+                   : pml_status == QW_PML_ERR_RESOURCE_LIMIT
+                         ? QW_STATUS_ERR_RESOURCE_LIMIT
+                         : QW_STATUS_ERR_FORMAT;
+    }
+    rc = convert_text_to_pdf(document.text_bytes, document.text_size, out_pdf,
+                             out_size, report);
+    qw_pml_document_free(&document);
+    if (rc == QW_STATUS_OK && report) {
+        snprintf(report->note, sizeof(report->note),
+                 "PMLZ layout: basic PML commands stripped; fonts and advanced "
+                 "layout are not preserved");
+    }
+    return rc;
+}
+
+static int convert_mobi_to_pdf(const uint8_t *data, size_t size,
+                               uint8_t **out_pdf, size_t *out_size,
+                               QwConvertReport *report)
+{
+    QwMobiDocument *document = NULL;
+    const uint8_t *text;
+    size_t text_size = 0u;
+    QwMobiStatus status;
+    int rc;
+
+    status = qw_mobi_parse(data, size, &document);
+    if (status != QW_MOBI_OK || !document) {
+        if (report) snprintf(report->note, sizeof(report->note),
+                             "MOBI parse failed with status %d", (int)status);
+        return status == QW_MOBI_ERROR_OUT_OF_MEMORY
+                   ? QW_STATUS_ERR_OUT_OF_MEMORY
+                   : status == QW_MOBI_ERROR_RESOURCE_LIMIT
+                         ? QW_STATUS_ERR_RESOURCE_LIMIT
+                         : QW_STATUS_ERR_FORMAT;
+    }
+    text = qw_mobi_document_text(document, &text_size);
+    rc = convert_text_to_pdf(text, text_size, out_pdf, out_size, report);
+    qw_mobi_document_free(document);
+    if (rc == QW_STATUS_OK && report) {
+        snprintf(report->note, sizeof(report->note),
+                 "MOBI/AZW3 layout: PalmDOC text rendered; markup, styles, "
+                 "images and DRM-protected content are not preserved");
+    }
+    return rc;
+}
+
+int qw_doc_convert_memory_with_options(const uint8_t *data, size_t size,
+                                        const char *input_extension,
+                                        int reflow_epub,
+                                        const QwConvertOptions *options,
+                                        uint8_t **out_pdf,
+                                        size_t *out_size,
+                                        QwConvertReport *report)
 {
     uint8_t *html = NULL;
     size_t html_size = 0u;
@@ -706,23 +982,115 @@ int qw_doc_convert_memory(const uint8_t *data, size_t size,
                                  "image decode failed with status %d", status);
             return status;
         }
-        status = qw_doc_image_to_pdf(&image, out_pdf, out_size, report);
+        status = qw_doc_image_to_pdf_mode(
+            &image, options ? options->page_mode : QW_RASTER_PAGE_MODE_IMAGE,
+            out_pdf, out_size, report);
         qw_image_free(&image);
         return status;
+    }
+    else if (qw_email_probe(data, size) ||
+             convert_extension_contains(extension, "eml")) {
+        return convert_email_to_pdf(data, size, out_pdf, out_size, report);
+    }
+    else if (qw_mobi_probe(data, size) ||
+             convert_extension_contains(extension, "mobi") ||
+             convert_extension_contains(extension, "azw3") ||
+             convert_extension_contains(extension, "azw")) {
+        return convert_mobi_to_pdf(data, size, out_pdf, out_size, report);
     }
     else if ((spreadsheet_format = convert_spreadsheet_format(
                   extension, &is_spreadsheet)) !=
              QW_SPREADSHEET_FORMAT_INVALID) {
         /* ZIP-based XLSX/ODS packages are spreadsheets, not DOCX/ODT. */
     } else if (convert_region_equals(data, size, 0u, "PK\x03\x04")) {
-        if (strstr(extension, "docx") || strstr(extension, "docm") ||
-            strstr(extension, "dotx")) {
+        /* Member names are stored verbatim in the ZIP central directory, so a
+         * byte search identifies the package family before any parser runs.
+         * Unknown packages are reported as unsupported instead of being
+         * mistaken for a broken OpenDocument file. */
+        if (contains_text(data, size, "application/epub+zip")) {
+            char *epub_html = NULL;
+            size_t epub_html_size = 0u;
+            int epub_status =
+                epub_to_html_internal(data, size, &epub_html, &epub_html_size,
+                                      report);
+            if (epub_status != QW_STATUS_OK) return epub_status;
+            epub_status = qw_doc_convert_html(epub_html, epub_html_size, out_pdf,
+                                              out_size, report);
+            free(epub_html);
+            if (epub_status == QW_STATUS_OK && report) {
+                snprintf(report->note, sizeof(report->note),
+                         "EPUB reflow: text/styles rendered; images and CSS "
+                         "approximated");
+            }
+            return epub_status;
+        }
+        if (convert_extension_contains(extension, "pptx") ||
+            convert_extension_contains(extension, "pptm") ||
+            convert_extension_contains(extension, "potx") ||
+            convert_extension_contains(extension, "potm") ||
+            convert_extension_contains(extension, "ppsx") ||
+            convert_extension_contains(extension, "ppsm") ||
+            contains_text(data, size, "ppt/presentation.xml")) {
+            return convert_pptx_to_pdf(data, size, extension, out_pdf, out_size,
+                                       report);
+        }
+        if (convert_extension_contains(extension, "odp") ||
+            convert_extension_contains(extension, "otp") ||
+            contains_text(data, size,
+                          "application/vnd.oasis.opendocument.presentation")) {
+            return convert_odp_to_pdf(data, size, extension, out_pdf, out_size,
+                                      report);
+        }
+        if (convert_extension_contains(extension, "hwpx") ||
+            contains_text(data, size, "Contents/section")) {
+            return convert_hwpx_to_pdf(data, size, out_pdf, out_size, report);
+        }
+        if (convert_extension_contains(extension, "htmlz") ||
+            contains_text(data, size, "index.html") ||
+            contains_text(data, size, "index.htm")) {
+            return convert_htmlz_to_pdf(data, size, out_pdf, out_size, report);
+        }
+        if (convert_extension_contains(extension, "txtz") ||
+            contains_text(data, size, "index.txt")) {
+            return convert_text_archive_to_pdf(data, size,
+                                               QW_TEXT_ARCHIVE_TXTZ, out_pdf,
+                                               out_size, report);
+        }
+        if (convert_extension_contains(extension, "pmlz") ||
+            contains_text(data, size, "index.pml")) {
+            return convert_pmlz_to_pdf(data, size, out_pdf, out_size, report);
+        }
+        if (convert_extension_contains(extension, "xlsx") ||
+            convert_extension_contains(extension, "xlsm") ||
+            convert_extension_contains(extension, "xltx") ||
+            contains_text(data, size, "xl/workbook.xml")) {
+            spreadsheet_format = QW_SPREADSHEET_FORMAT_XLSX;
+            is_spreadsheet = 1;
+        } else if (convert_extension_contains(extension, "ods") ||
+                   convert_extension_contains(extension, "ots") ||
+                   contains_text(
+                       data, size,
+                       "application/vnd.oasis.opendocument.spreadsheet")) {
+            spreadsheet_format = QW_SPREADSHEET_FORMAT_ODS;
+            is_spreadsheet = 1;
+        } else if (convert_extension_contains(extension, "docx") ||
+                   convert_extension_contains(extension, "docm") ||
+                   convert_extension_contains(extension, "dotx") ||
+                   convert_extension_contains(extension, "dotm") ||
+                   qw_docx_probe(data, size) != 0) {
             is_docx = 1;
-        } else if (strstr(extension, "odt") || strstr(extension, "ott")) {
+        } else if (convert_extension_contains(extension, "odt") ||
+                   convert_extension_contains(extension, "ott") ||
+                   contains_text(data, size,
+                                 "application/vnd.oasis.opendocument.text") ||
+                   contains_text(data, size, "content.xml")) {
             is_odt = 1;
         } else {
-            is_docx = qw_docx_probe(data, size) != 0;
-            is_odt = !is_docx;
+            if (report) snprintf(report->note, sizeof(report->note),
+                                 "unrecognized ZIP package: not DOCX/DOCM/DOTX/"
+                                 "DOTM, ODT/OTT, PPTX family, ODP/OTP, HWPX, "
+                                 "XLSX family, ODS, EPUB, HTMLZ, TXTZ or PMLZ");
+            return QW_STATUS_ERR_UNSUPPORTED;
         }
     } else if (strstr(extension, "fb2") ||
                contains_text((const char *)data, size, "<FictionBook")) {
@@ -733,6 +1101,10 @@ int qw_doc_convert_memory(const uint8_t *data, size_t size,
         is_text = 1;
     } else if (convert_region_equals(data, size, 0u, "<?xml") ||
                contains_text((const char *)data, size, "office:document")) {
+        if (contains_text((const char *)data, size, "office:presentation")) {
+            return convert_odp_to_pdf(data, size, extension, out_pdf, out_size,
+                                      report);
+        }
         is_odt = 1;
     } else if (convert_skip_preamble(data, size) < data + size &&
                convert_skip_preamble(data, size)[0] == '<' &&
@@ -816,6 +1188,16 @@ int qw_doc_convert_memory(const uint8_t *data, size_t size,
     }
     free(html);
     return rc;
+}
+
+int qw_doc_convert_memory(const uint8_t *data, size_t size,
+                          const char *input_extension, int reflow_epub,
+                          uint8_t **out_pdf, size_t *out_size,
+                          QwConvertReport *report)
+{
+    return qw_doc_convert_memory_with_options(data, size, input_extension,
+                                               reflow_epub, NULL, out_pdf,
+                                               out_size, report);
 }
 
 void qw_buffer_free(void *buffer)
