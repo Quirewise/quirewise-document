@@ -32,6 +32,7 @@ if(NOT TARGET Quirewise::Crypto)
 endif()
 if(NOT TARGET Quirewise::Spreadsheet)
     find_package(QuirewiseSpreadsheet CONFIG REQUIRED)
+find_package(QuirewiseText CONFIG REQUIRED)
 endif()
 file(GLOB_RECURSE QW_SOURCES CONFIGURE_DEPENDS src/*.c src/*.cpp)
 add_library(quirewise_document ${QW_LIBRARY_TYPE} ${QW_SOURCES})
@@ -44,7 +45,7 @@ target_include_directories(quirewise_document PUBLIC
     "$<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>"
     "$<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>"
     PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src ${CMAKE_CURRENT_SOURCE_DIR}/src/core ${CMAKE_CURRENT_SOURCE_DIR}/src/formats ${CMAKE_CURRENT_SOURCE_DIR}/src/backends)
-target_link_libraries(quirewise_document PRIVATE Quirewise::Archive Quirewise::Data Quirewise::Compression Quirewise::Ebook Quirewise::Image Quirewise::Crypto Quirewise::Spreadsheet)
+target_link_libraries(quirewise_document PRIVATE Quirewise::Archive Quirewise::Data Quirewise::Compression Quirewise::Ebook Quirewise::Image Quirewise::Crypto Quirewise::Spreadsheet Quirewise::Text)
 install(TARGETS quirewise_document EXPORT QuirewiseDocumentTargets
     ARCHIVE DESTINATION "${CMAKE_INSTALL_LIBDIR}"
     LIBRARY DESTINATION "${CMAKE_INSTALL_LIBDIR}"

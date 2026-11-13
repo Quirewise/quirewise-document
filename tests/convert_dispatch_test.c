@@ -36,6 +36,28 @@ int main(void)
     uint8_t *pdf = NULL;
     size_t pdf_size = 0u;
 
+    /* RTF is routed through the text reader and the layout writer. */
+    {
+        static const char rtf[] =
+            "{\\rtf1\\ansi\\deff0 {\\fonttbl {\\f0 Times New Roman;}}"
+            "\\f0\\fs24 Hello from the RTF dispatch route.\\par}";
+        uint8_t *text = NULL;
+        size_t text_size = 0u;
+        int rc = qw_convert_to_pdf_memory(rtf, sizeof(rtf) - 1u, &options, &pdf,
+                                          &pdf_size, &report);
+        CHECK(rc == QW_STATUS_OK);
+        CHECK(is_pdf(pdf, pdf_size));
+        rc = qw_convert_to_format_memory(pdf, pdf_size, QW_FORMAT_TXT, &options,
+                                         &text, &text_size, &report);
+        CHECK(rc == QW_STATUS_OK);
+        CHECK(text_size > 0u);
+        CHECK(strstr((const char *)text, "RTF dispatch route") != NULL);
+        qw_buffer_free(text);
+        free(pdf);
+        pdf = NULL;
+        pdf_size = 0u;
+    }
+
     /* EML is routed through the email reader and the layout writer. */
     {
         static const char eml[] =

@@ -29,6 +29,7 @@
 #include <quirewise/odf_presentation.h>
 #include <quirewise/pml.h>
 #include <quirewise/pptx.h>
+#include <quirewise/rtf.h>
 #include <quirewise/text_archive.h>
 
 #include "format_registry.h"
@@ -925,6 +926,36 @@ static int convert_mobi_to_pdf(const uint8_t *data, size_t size,
     return rc;
 }
 
+static int convert_rtf_to_pdf(const uint8_t *data, size_t size,
+                              uint8_t **out_pdf, size_t *out_size,
+                              QwConvertReport *report)
+{
+    QwRtfDocument document;
+    QwRtfStatus status;
+    int rc;
+
+    memset(&document, 0, sizeof(document));
+    status = qw_rtf_parse_html(data, size, &document);
+    if (status != QW_RTF_OK) {
+        if (report) snprintf(report->note, sizeof(report->note),
+                             "RTF parse failed with status %d", (int)status);
+        return status == QW_RTF_ERR_OUT_OF_MEMORY
+                   ? QW_STATUS_ERR_OUT_OF_MEMORY
+                   : status == QW_RTF_ERR_RESOURCE_LIMIT
+                         ? QW_STATUS_ERR_RESOURCE_LIMIT
+                         : QW_STATUS_ERR_FORMAT;
+    }
+    rc = convert_html_to_pdf((const uint8_t *)document.html, document.html_size,
+                             out_pdf, out_size, report);
+    qw_rtf_document_free(&document);
+    if (rc == QW_STATUS_OK && report) {
+        snprintf(report->note, sizeof(report->note),
+                 "RTF layout: paragraphs, character styles and inline pictures "
+                 "rendered; tables are flattened and colours/headers are not "
+                 "preserved");
+    }
+    return rc;
+}
 int qw_doc_convert_memory_with_options(const uint8_t *data, size_t size,
                                         const char *input_extension,
                                         int reflow_epub,
@@ -997,6 +1028,10 @@ int qw_doc_convert_memory_with_options(const uint8_t *data, size_t size,
              convert_extension_contains(extension, "azw3") ||
              convert_extension_contains(extension, "azw")) {
         return convert_mobi_to_pdf(data, size, out_pdf, out_size, report);
+    }
+    else if (convert_extension_contains(extension, "rtf") ||
+             convert_region_equals(data, size, 0u, "{\\rtf")) {
+        return convert_rtf_to_pdf(data, size, out_pdf, out_size, report);
     }
     else if ((spreadsheet_format = convert_spreadsheet_format(
                   extension, &is_spreadsheet)) !=
