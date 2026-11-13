@@ -86,7 +86,8 @@ QW_API int qw_convert_file_to_format(const char *input_path,
 /*
  * Check whether a file can be read through its registered Quirewise route.
  * PDF inputs are opened and every page is rendered; other non-audio inputs
- * use the PDF conversion route, while audio inputs use FLAC. Any generated
+ * use the PDF conversion route. Audio inputs are not verified by this package
+ * (the application routes them to quirewise-audio and scans packets). Any generated
  * bytes are discarded without creating an output file. Memory use can
  * therefore be similar to a normal in-memory conversion. Only input keys,
  * archive passwords, and audio_track are used from options; output processing

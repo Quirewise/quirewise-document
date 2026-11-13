@@ -36,6 +36,20 @@ int main(void)
     uint8_t *pdf = NULL;
     size_t pdf_size = 0u;
 
+    /* SVG is XML but belongs to the vector route: the document package must
+     * decline it instead of reporting a broken OpenDocument file. */
+    {
+        static const char svg[] =
+            "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"4\" height=\"4\"/>";
+        QwConvertReport svg_report;
+        memset(&svg_report, 0, sizeof(svg_report));
+        CHECK(qw_convert_to_pdf_memory(svg, sizeof(svg) - 1u, &options, &pdf,
+                                       &pdf_size, &svg_report) ==
+              QW_STATUS_ERR_UNSUPPORTED);
+        CHECK(pdf == NULL && pdf_size == 0u);
+        CHECK(strstr(svg_report.note, "SVG") != NULL);
+    }
+
     /* RTF is routed through the text reader and the layout writer. */
     {
         static const char rtf[] =

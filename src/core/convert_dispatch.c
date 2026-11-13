@@ -620,6 +620,29 @@ static int convert_spreadsheet_to_pdf(const uint8_t *data, size_t size,
 /* to the shared file conversion entry point.                          */
 /* ------------------------------------------------------------------ */
 
+
+/* SVG is XML but belongs to the vector package; detect it before the generic
+ * XML/ODT branch so it is not reported as a broken OpenDocument file. */
+static int convert_looks_like_svg(const uint8_t *data, size_t size)
+{
+    const uint8_t *first = convert_skip_preamble(data, size);
+    const uint8_t *limit = data + size;
+    if (first + 5u <= limit && memcmp(first, "<?xml", 5u) == 0) {
+        const uint8_t *cursor = first + 5u;
+        const uint8_t *after = NULL;
+        while (cursor + 1u < limit) {
+            if (cursor[0] == '?' && cursor[1] == '>') {
+                after = cursor + 2u;
+                break;
+            }
+            ++cursor;
+        }
+        if (!after) return 0;
+        first = convert_skip_preamble(after, (size_t)(limit - after));
+    }
+    return first + 4u <= limit && memcmp(first, "<svg", 4u) == 0;
+}
+
 static int convert_extension_contains(const char *extension, const char *name)
 {
     return extension && extension[0] && strstr(extension, name) != NULL;
@@ -1019,6 +1042,12 @@ int qw_doc_convert_memory_with_options(const uint8_t *data, size_t size,
         qw_image_free(&image);
         return status;
     }
+    else if (convert_looks_like_svg(data, size)) {
+        if (report) snprintf(report->note, sizeof(report->note),
+                             "SVG input is routed by the vector package, "
+                             "not the document package");
+        return QW_STATUS_ERR_UNSUPPORTED;
+    }
     else if (qw_email_probe(data, size) ||
              convert_extension_contains(extension, "eml")) {
         return convert_email_to_pdf(data, size, out_pdf, out_size, report);
@@ -1136,6 +1165,14 @@ int qw_doc_convert_memory_with_options(const uint8_t *data, size_t size,
         is_text = 1;
     } else if (convert_region_equals(data, size, 0u, "<?xml") ||
                contains_text((const char *)data, size, "office:document")) {
+        /* SVG is an XML document but belongs to quirewise-vector; the
+         * application routes it. Do not report it as a broken OpenDocument. */
+        if (contains_text((const char *)data, size, "<svg")) {
+            if (report) snprintf(report->note, sizeof(report->note),
+                                 "SVG input is routed by the vector package, "
+                                 "not the document package");
+            return QW_STATUS_ERR_UNSUPPORTED;
+        }
         if (contains_text((const char *)data, size, "office:presentation")) {
             return convert_odp_to_pdf(data, size, extension, out_pdf, out_size,
                                       report);
@@ -1294,7 +1331,8 @@ static int pdf_route_to_png(const uint8_t *data, size_t size,
         report->output_size = *out_size;
         snprintf(report->note, sizeof(report->note),
                  "PNG output rendered the first of %zu page(s) at %u dpi; "
-                 "text is not painted (QW_ROUTE_LOSS_RASTERIZATION)",
+                 "text uses the built-in approximation font "
+                 "(QW_ROUTE_LOSS_RASTERIZATION)",
                  pages, (unsigned)QW_PDF_ROUTE_DPI);
     }
     return rc;
